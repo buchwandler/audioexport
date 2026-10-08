@@ -1,0 +1,7 @@
+{
+  "chapters": [
+    { "title": "Introduction", "start_ms": 0 },
+    { "title": "Part One", "start_ms": 120000 },
+    { "title": "Part Two", "start_ms": 300000 }
+  ]
+}
