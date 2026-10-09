@@ -1,0 +1,159 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.1.1
+git_base_ref: v0.1.0
+git_base_sha: 3a94b2534d26f7fef01027c07ca861b1dcd6926b
+git_head_ref: HEAD
+git_head_sha: 6b0e7a0cabf32195c0080d9bae6122f20c0c252e
+git_range: 3a94b2534d26f7fef01027c07ca861b1dcd6926b..6b0e7a0cabf32195c0080d9bae6122f20c0c252e
+commit_count: 3
+rows:
+  - sha: 3d51c13bb8342d90bd9477ddcca79818ab88b949
+    source_ref: git:3d51c13bb8342d90bd9477ddcca79818ab88b949
+    short_sha: 3d51c13
+    changed_paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/api.py
+      - audioexport/audiobook.py
+      - audioexport/audiobook_profile.py
+      - audioexport/chapters.py
+      - audioexport/cli.py
+      - audioexport/fftools.py
+      - audioexport/inputs.py
+      - audioexport/metadata.py
+      - tests/test_api_import.py
+      - tests/test_audiobook_atomicity.py
+      - tests/test_audiobook_cache.py
+      - tests/test_audiobook_inputs.py
+      - tests/test_audiobook_metadata.py
+      - tests/test_audiobook_profile.py
+      - tests/test_audiobook_real.py
+      - tests/test_audiobook_scale.py
+      - tests/test_chapters_txt.py
+      - tests/test_cli.py
+      - tests/test_probe_and_doctor.py
+    stats:
+      files_changed: 21
+      insertions: 2478
+      deletions: 7
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/api.py
+      - audioexport/audiobook.py
+      - audioexport/audiobook_profile.py
+      - audioexport/chapters.py
+      - audioexport/cli.py
+      - audioexport/fftools.py
+      - audioexport/inputs.py
+      - audioexport/metadata.py
+      - tests/test_audiobook_atomicity.py
+      - tests/test_audiobook_cache.py
+      - tests/test_audiobook_profile.py
+      - tests/test_audiobook_real.py
+      - tests/test_cli.py
+    observed_behavior:
+      Adds ordered multi-track audiobook assembly that normalizes source
+      tracks to common AAC settings, concatenates them without a second audio encode,
+      writes metadata, cover art, and chapters, verifies the final M4B, and records
+      a reusable audiobook manifest.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: imprkve m4b support"
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: 31a1e4e74bd6a1721ecba0b19eb59b401415e40a
+    source_ref: git:31a1e4e74bd6a1721ecba0b19eb59b401415e40a
+    short_sha: 31a1e4e
+    changed_paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/api.py
+      - audioexport/audiobook.py
+      - audioexport/fftools.py
+      - audioexport/pipeline.py
+      - audioexport/preflight.py
+      - audioexport/profile.py
+      - audioexport/validation.py
+      - docs/Makefile
+      - docs/conf.py
+      - docs/make.bat
+      - docs/make.py
+      - docs/readio-migration.md
+      - docs/requirements.txt
+      - scripts/check_package_artifacts.py
+      - tests/test_api_import.py
+      - tests/test_preflight.py
+      - tests/test_probe_and_doctor.py
+      - tests/test_profile_resolution.py
+      - tests/test_profiles_multiformat.py
+    stats:
+      files_changed: 21
+      insertions: 1245
+      deletions: 223
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audioexport/api.py
+      - audioexport/pipeline.py
+      - audioexport/preflight.py
+      - audioexport/profile.py
+      - audioexport/validation.py
+      - docs/readio-migration.md
+      - tests/test_preflight.py
+      - tests/test_profile_resolution.py
+      - tests/test_profiles_multiformat.py
+    observed_behavior:
+      Adds a read-only preflight API that resolves profile outputs,
+      validates metadata, source duration, selected resources, chapters, and only the
+      requested encoders before any export writes; exposes the resolved values through
+      the public API.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add preflight api"
+    target_entry_id: entry-0002
+    notes: ""
+  - sha: 6b0e7a0cabf32195c0080d9bae6122f20c0c252e
+    source_ref: git:6b0e7a0cabf32195c0080d9bae6122f20c0c252e
+    short_sha: 6b0e7a0
+    changed_paths:
+      - .ledger/documentledger/.ledger-project.toml
+      - .ledger/documentledger/config.toml
+      - .ledger/documentledger/data/.ledger-project.toml
+      - .ledger/documentledger/data/docs/docs-changelog-md-77f023b9.yaml
+      - .ledger/documentledger/data/docs/docs-index-md-b4d68dc8.yaml
+      - .ledger/documentledger/data/docs/docs-readio-migration-md-ce145e95.yaml
+      - .ledger/documentledger/data/docs/readme-md-b3356305.yaml
+      - .ledger/documentledger/data/scan.yaml
+      - .ledger/documentledger/data/source-index.json
+      - .ledger/documentledger/data/storage.yaml
+      - .ledger/ledger.toml
+      - docs/conf.py
+      - docs/index.md
+    stats:
+      files_changed: 13
+      insertions: 5924
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - docs/conf.py
+      - docs/index.md
+    observed_behavior:
+      Adds a Sphinx documentation landing page with installation, CLI,
+      profile, audiobook, Python API, artifact-safety, and migration links, and fixes
+      the Sphinx viewcode extension name.
+    public_impact: docs
+    decision: accepted
+    stale: false
+    evidence_subject: "doc: add index"
+    target_entry_id: entry-0003
+    notes:
+      Ledger metadata changes in this commit are internal documentation-scan state
+      and are not release-note material.

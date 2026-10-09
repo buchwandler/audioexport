@@ -1,0 +1,2790 @@
+ README.md                         |  76 +++-
+ audioexport/__init__.py           |  10 +
+ audioexport/api.py                |  10 +
+ audioexport/audiobook.py          | 826 ++++++++++++++++++++++++++++++++++++++
+ audioexport/audiobook_profile.py  | 271 +++++++++++++
+ audioexport/chapters.py           |  66 +++
+ audioexport/cli.py                | 138 ++++++-
+ audioexport/fftools.py            |  21 +
+ audioexport/inputs.py             | 151 +++++++
+ audioexport/metadata.py           | 108 +++++
+ tests/test_api_import.py          |   6 +-
+ tests/test_audiobook_atomicity.py | 165 ++++++++
+ tests/test_audiobook_cache.py     |  95 +++++
+ tests/test_audiobook_inputs.py    |  70 ++++
+ tests/test_audiobook_metadata.py  |  64 +++
+ tests/test_audiobook_profile.py   | 119 ++++++
+ tests/test_audiobook_real.py      |  95 +++++
+ tests/test_audiobook_scale.py     |  31 ++
+ tests/test_chapters_txt.py        |  50 +++
+ tests/test_cli.py                 | 110 +++++
+ tests/test_probe_and_doctor.py    |   3 +
+ 21 files changed, 2478 insertions(+), 7 deletions(-)
+
+diff --git a/README.md b/README.md
+index f5e3ee2..cd548a4 100644
+--- a/README.md
++++ b/README.md
+@@ -2,7 +2,7 @@
+
+ An independent Python library and command-line interface for exporting audio through **FFmpeg**. This is the first extraction step from Readio's output/encoding subsystem, but **audioexport does not import or install Readio, AudioCompose, UtterPlan, or synthesis engines**.
+
+-Supported formats: WAV (PCM16), FLAC, MP3, M4A (AAC), M4B (AAC audiobook), OGG (Vorbis), and Opus. Handles tagged metadata, embedded JPEG/PNG cover art for MP3/M4A/M4B, JSON chapter timelines for M4A/M4B, FFprobe verification, artifact identities and safe reuse.
++Supported formats: WAV (PCM16), FLAC, MP3, M4A (AAC), M4B (AAC audiobook), OGG (Vorbis), and Opus. Handles tagged metadata, embedded JPEG/PNG cover art for MP3/M4A/M4B, JSON chapter timelines for M4A/M4B, standalone ordered multi-track audiobook assembly, FFprobe verification, artifact identities and safe reuse.
+
+ ## Install
+
+@@ -22,7 +22,7 @@ python -m pip install -e .
+ audioexport doctor --json
+ ```
+
+-`doctor` reports package/tool versions and encoder availability per format. Its existing `ready` key means FFmpeg and FFprobe are present; `all_formats_ready` and each `formats` entry report encoder capability and a reason when unavailable. `run_profile()` checks the encoders selected by the profile before writing outputs.
++`doctor` reports package/tool versions and encoder availability per format. Its existing `ready` key means FFmpeg and FFprobe are present; `all_formats_ready` and each `formats` entry report encoder capability and a reason when unavailable. The additive `features` entries report `m4b_encode`, `m4b_audiobook`, and `m4b_stream_copy` availability; missing optional capabilities do not make `ready` false. `run_profile()` checks the encoders selected by the profile before writing outputs.
+
+ The only base Python dependency is `tomli` on Python 3.10. FFmpeg/FFprobe are external executables; AudioExport does not install or import Readio, AudioCompose, UtterPlan, VoiceRender, soundfile, or NumPy.
+
+@@ -50,6 +50,72 @@ audioexport encode demo.wav --format m4b -o mybook.m4b \
+ audioexport run demo.wav --profile examples/export.toml --out-dir exported/ --json
+ ```
+
++## Standalone audiobook assembly
++
++`encode` converts one already-prepared audio source to a format; it does not merge a collection of source tracks. Use the separate `audiobook` workflow when starting from ordered tracks or a directory:
++
++```bash
++# Direct directory input: immediate audio files only, natural filename ordering.
++audioexport audiobook book-tracks/ -o book.m4b \
++  --title "My Book" --author "Author Name" --album "My Book" --cover cover.jpg
++
++# Or provide an explicit order; source title tags become chapter titles when present.
++audioexport audiobook 01-intro.mp3 02-chapter-one.flac 03-chapter-two.wav \
++  -o book.m4b --bitrate 96k --language eng
++
++# Explicit chapter starts from chapters.txt or the existing JSON/Readio timeline format.
++audioexport audiobook book-tracks/ -o book.m4b --chapters-file chapters.txt
++```
++
++Each source track becomes one chapter by default. Chapter starts use normalized segment durations; titles prefer an explicit `AudiobookTrack` title, then the source title tag, then the filename stem. Tracks are serially normalized to common AAC settings, concatenated with stream copy, and final-muxed without a second audio encode. Sample rate and channel count default from the first track; only mono/stereo targets are supported. The audiobook command defaults to the FFmpeg-compatible `media_type=2` tag. `--author` (or its `--artist` alias) writes the player-compatible `artist` tag; `--album-artist`, `--writer`, and `--long-description` map to `album_artist`, `composer`, and `synopsis`. `--metadata KEY=VALUE` adds or overrides an FFmpeg tag.
++
++For one directory input, the CLI discovers `cover.jpg`, then `cover.jpeg`, then `cover.png`, plus `chapters.txt`, when explicit resources were not supplied. Discovered names appear in command output and the audiobook manifest. Use `--no-auto-sidecars` to disable this behavior. The library API does not scan sibling files unless called with `discover_sidecars=True`.
++
++Python callers can use the same assembly workflow without invoking the CLI:
++
++```python
++from audioexport import AudiobookMetadata, AudiobookTrack, build_audiobook
++
++result = build_audiobook(
++    [
++        AudiobookTrack("01-intro.mp3", title="Introduction"),
++        "02-chapter-one.flac",
++    ],
++    "book.m4b",
++    metadata=AudiobookMetadata(title="My Book", author="Author Name"),
++    cover="cover.jpg",
++)
++print(result.track_count, result.chapter_count, result.reused)
++```
++
++A separate `audioexport.audiobook.v1` profile describes ordered inputs and explicit resources. All relative paths resolve from the profile file; no glob or implicit directory expansion is used in TOML. `chapters_file` is a top-level resource path, while `[chapters]` selects its mode:
++
++```toml
++schema = "audioexport.audiobook.v1"
++output = "My Book.m4b"
++inputs = ["01 Intro.mp3", "02 Chapter One.flac"]
++cover = "cover.jpg"
++chapters_file = "chapters.txt"
++
++[audio]
++bitrate = "96k"
++sample_rate = 44100
++channels = 2
++
++[metadata]
++title = "My Book"
++author = "Author Name"
++album = "My Book"
++genre = "Audiobook"
++language = "eng"
++
++[chapters]
++mode = "explicit"       # tracks | explicit | none
++# title_source = "tag"  # tag (falls back to filename) | filename
++```
++
++Run it with `audioexport audiobook --profile audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file` override profile values; the TOML input order remains authoritative. `mode = "tracks"` (the default) creates one chapter per track; `mode = "explicit"` requires `chapters_file`; `mode = "none"` disables chapters. Existing `encode(..., format="m4b", timeline=...)` remains the right choice for Readio's prepared master and project timeline.
++
+ If `--output` is not set for `encode`, the output filename defaults to the input stem and chosen format. To avoid destroying the input, encoding input and output to the same real path is always rejected.
+
+ Without `--force`, an untracked, symlink, or manually modified output is never overwritten. A previously generated output is updated when its sidecar and checksum still match; re-running identical options returns `reused: true` without re-encoding. `--force` authorizes replacing an unknown or modified regular file, but symlink outputs and sidecars are always rejected. Writes are staged with their manifest; a failed manifest commit restores the last good pair when possible, and an incomplete recovery reports the preserved backup path. A per-target process lock rejects concurrent writers with `audioexport.output_busy`; remove a stale lock only after confirming no writer is active.
+@@ -87,7 +153,7 @@ print(probe("exported/book.m4b")["chapters"])
+
+ You may import the same public functions from `audioexport.api` as well as from `audioexport`.
+
+-The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult` containing the identity, path, checksum, and reuse state. Both `encode` and `run_profile` work without a Readio project.
++The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult`; `build_audiobook()` returns an `AudiobookResult` with track/chapter counts and verified duration. Both APIs include identity, path, checksum, and reuse state, and work without a Readio project.
+
+ ## Export profile
+
+@@ -158,7 +224,7 @@ For an incremental Readio migration, the same `--timeline` API also reads **Read
+
+ ## Integrity and versioning
+
+-Each completed output has a sibling sidecar, for example `output.mp3.audioexport.json`, holding `audioexport.manifest.v1`, a SHA-256 export identity, the source/output and consumed-resource digests, FFmpeg/FFprobe versions, normalized options, chapter mapping, and probed output summary. The identity is **input-content + relevant options/resources + tools**, not output location or TOML formatting. A bitrate change affects only that output; a timeline change affects only chapter-consuming outputs; changing shared metadata affects all outputs that inherit it. The original source is never modified.
++`encode()` and `run_profile()` outputs have a sibling sidecar, for example `output.mp3.audioexport.json`, holding `audioexport.manifest.v1`, a SHA-256 export identity, source/output and consumed-resource digests, tool versions, normalized options, chapter mapping, and the probed output summary. `build_audiobook()` uses the same sidecar path with `audioexport.audiobook-manifest.v1`, recording ordered tracks, consumed resources, normalized settings, resolved chapter structure, tools, and verification. Generic export identity is **input-content + relevant options/resources + tools**, not output location or TOML formatting. The original sources are never modified.
+
+ Encoding uses argument-vector subprocess calls (`shell=False`) and stages both audio and manifest before committing. The output lock serializes same-target writers across processes; a competing call receives a typed busy error. If a sidecar commit fails, the previous output/manifest are restored when possible. A recovery failure retains its backup and refuses to treat a mismatched sidecar as current; inspect the reported recovery path before retrying. FFprobe validation checks the single audio stream, codec, duration, requested tags/chapters, and cover codec/disposition.
+
+@@ -185,7 +251,7 @@ python scripts/check_package_artifacts.py
+ audioexport doctor --json
+ ```
+
+-Tests cover seven real formats in one profile, selective cache invalidation, M4A/M4B chapters and covers, Readio sample timelines, malformed probes, encoder availability, transactional failure recovery, no-clobber behavior, and concurrent writers. CI runs Python 3.10 and 3.13 on Linux, Windows, and macOS, and checks lint, formatting, typing, build metadata, Twine, package contents, and an isolated wheel install outside the checkout. Cross-platform encoder availability still depends on the FFmpeg build installed by the runner.
++Tests cover seven real formats in one profile, mixed-format audiobook assembly, 100-track ordering/chapters, audiobook cache invalidation, M4A/M4B chapters and covers, Readio sample timelines, malformed probes, encoder availability, transactional failure recovery, no-clobber behavior, and concurrent writers. CI runs Python 3.10 and 3.13 on Linux, Windows, and macOS, and checks lint, formatting, typing, build metadata, Twine, package contents, and an isolated wheel install outside the checkout. Cross-platform encoder availability still depends on the FFmpeg build installed by the runner.
+
+ ## Limitations (MVP)
+
+diff --git a/audioexport/__init__.py b/audioexport/__init__.py
+index 5a7c97e..85eda5c 100644
+--- a/audioexport/__init__.py
++++ b/audioexport/__init__.py
+@@ -4,6 +4,8 @@ from __future__ import annotations
+
+ from importlib.metadata import PackageNotFoundError, version
+
++from .audiobook import AudiobookResult, AudiobookTrack, build_audiobook
++from .audiobook_profile import AudiobookAudioOptions, AudiobookProfile, load_audiobook_profile
+ from .chapters import Chapter, load_chapters
+ from .errors import (
+     AudioExportError,
+@@ -14,6 +16,7 @@ from .errors import (
+ )
+ from .fftools import doctor, probe
+ from .formats import FORMATS, normalize_bitrate
++from .metadata import AudiobookMetadata
+ from .pipeline import ExportResult, encode, run_profile
+ from .profile import ExportProfile, OutputSpec, load_profile
+
+@@ -25,6 +28,11 @@ except PackageNotFoundError:
+ __all__ = [
+     "FORMATS",
+     "AudioExportError",
++    "AudiobookAudioOptions",
++    "AudiobookMetadata",
++    "AudiobookProfile",
++    "AudiobookResult",
++    "AudiobookTrack",
+     "Chapter",
+     "EncodingError",
+     "ExportProfile",
+@@ -34,8 +42,10 @@ __all__ = [
+     "ToolNotFoundError",
+     "VerificationError",
+     "__version__",
++    "build_audiobook",
+     "doctor",
+     "encode",
++    "load_audiobook_profile",
+     "load_chapters",
+     "load_profile",
+     "normalize_bitrate",
+diff --git a/audioexport/api.py b/audioexport/api.py
+index 922e3f5..67925df 100644
+--- a/audioexport/api.py
++++ b/audioexport/api.py
+@@ -2,6 +2,8 @@
+
+ from __future__ import annotations
+
++from .audiobook import AudiobookResult, AudiobookTrack, build_audiobook
++from .audiobook_profile import AudiobookAudioOptions, AudiobookProfile, load_audiobook_profile
+ from .chapters import Chapter, load_chapters
+ from .errors import (
+     AudioExportError,
+@@ -12,12 +14,18 @@ from .errors import (
+ )
+ from .fftools import doctor, probe
+ from .formats import FORMATS, normalize_bitrate
++from .metadata import AudiobookMetadata
+ from .pipeline import ExportResult, encode, run_profile
+ from .profile import ExportProfile, OutputSpec, load_profile
+
+ __all__ = [
+     "FORMATS",
+     "AudioExportError",
++    "AudiobookAudioOptions",
++    "AudiobookMetadata",
++    "AudiobookProfile",
++    "AudiobookResult",
++    "AudiobookTrack",
+     "Chapter",
+     "EncodingError",
+     "ExportProfile",
+@@ -26,8 +34,10 @@ __all__ = [
+     "OutputSpec",
+     "ToolNotFoundError",
+     "VerificationError",
++    "build_audiobook",
+     "doctor",
+     "encode",
++    "load_audiobook_profile",
+     "load_chapters",
+     "load_profile",
+     "normalize_bitrate",
+diff --git a/audioexport/audiobook.py b/audioexport/audiobook.py
+new file mode 100644
+index 0000000..7617fa3
+--- /dev/null
++++ b/audioexport/audiobook.py
+@@ -0,0 +1,826 @@
++"""Standalone multi-track audiobook assembly using FFmpeg and FFprobe."""
++
++from __future__ import annotations
++
++import json
++import os
++import shutil
++import tempfile
++from collections.abc import Mapping, Sequence
++from dataclasses import asdict, dataclass
++from pathlib import Path
++from typing import Any
++
++from .chapters import (
++    Chapter,
++    build_track_chapters,
++    ffmetadata_text,
++    load_chapters,
++    load_chapters_txt,
++    normalize_chapters,
++)
++from .errors import EncodingError, InvalidExportError, VerificationError
++from .fftools import encoder_for_format, executable, probe, run, version
++from .formats import EXPECTED_CODECS, encoder_options, normalize_bitrate
++from .inputs import discover_audio_inputs, source_title
++from .metadata import AudiobookMetadata, audiobook_tags
++from .pipeline import (
++    _canonical_hash,
++    _commit_export,
++    _cover_kind,
++    _duration_ms,
++    _manifest_path,
++    _output_lock,
++    _producer_version,
++    _verify_output,
++    sha256_file,
++)
++
++
++@dataclass(frozen=True, slots=True)
++class AudiobookTrack:
++    """One ordered source track and optional explicit chapter title."""
++
++    path: Path | str
++    title: str | None = None
++
++    def __post_init__(self) -> None:
++        if not isinstance(self.path, (str, Path)):
++            raise InvalidExportError(
++                "track path must be a file path", code="audioexport.audiobook_input_invalid"
++            )
++        object.__setattr__(self, "path", Path(self.path))
++        if self.title is not None and (not isinstance(self.title, str) or not self.title.strip()):
++            raise InvalidExportError(
++                "track title must be a non-empty string", code="audioexport.audiobook_input_invalid"
++            )
++
++
++@dataclass(frozen=True, slots=True)
++class AudiobookResult:
++    path: Path
++    export_id: str
++    output_sha256: str
++    manifest_path: Path
++    reused: bool
++    chapter_count: int
++    track_count: int
++    duration_ms: int
++    codec: str
++    discovered_resources: tuple[str, ...] = ()
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            **asdict(self),
++            "path": str(self.path),
++            "manifest_path": str(self.manifest_path),
++            "discovered_resources": list(self.discovered_resources),
++        }
++
++
++def _audio_stream(info: Mapping[str, Any], *, label: str) -> Mapping[str, Any]:
++    streams = info.get("streams")
++    if not isinstance(streams, list):
++        raise VerificationError(
++            f"{label} has invalid stream data", code="audioexport.probe_invalid"
++        )
++    audio = [
++        item for item in streams if isinstance(item, Mapping) and item.get("codec_type") == "audio"
++    ]
++    if len(audio) != 1:
++        raise VerificationError(
++            f"{label} must contain exactly one audio stream", code="audioexport.stream_mismatch"
++        )
++    return audio[0]
++
++
++def _audio_properties(info: Mapping[str, Any], *, label: str) -> tuple[str, int, int, int]:
++    stream = _audio_stream(info, label=label)
++    try:
++        codec = str(stream["codec_name"])
++        sample_rate = int(stream["sample_rate"])
++        channels = int(stream["channels"])
++        duration_ms = _duration_ms(info)
++    except (KeyError, TypeError, ValueError) as exc:
++        raise VerificationError(
++            f"{label} lacks valid audio properties", code="audioexport.probe_invalid"
++        ) from exc
++    if sample_rate <= 0 or channels <= 0 or duration_ms <= 0:
++        raise VerificationError(
++            f"{label} lacks valid audio properties", code="audioexport.probe_invalid"
++        )
++    return codec, sample_rate, channels, duration_ms
++
++
++def _load_audiobook_manifest(path: Path) -> dict[str, Any] | None:
++    if path.is_symlink():
++        return None
++    try:
++        payload = json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, ValueError):
++        return None
++    return (
++        payload
++        if isinstance(payload, dict)
++        and payload.get("schema") == "audioexport.audiobook-manifest.v1"
++        else None
++    )
++
++
++def _validate_chapter_rows(chapters: Sequence[Chapter]) -> tuple[Chapter, ...]:
++    rows = tuple(chapters)
++    previous_start = -1
++    for row in rows:
++        if (
++            not isinstance(row, Chapter)
++            or not isinstance(row.title, str)
++            or not row.title.strip()
++            or isinstance(row.start_ms, bool)
++            or not isinstance(row.start_ms, int)
++            or row.start_ms < 0
++            or row.start_ms <= previous_start
++        ):
++            raise InvalidExportError(
++                "chapters must have non-empty titles and strictly increasing millisecond starts",
++                code="audioexport.chapters_invalid",
++            )
++        if row.end_ms is not None and (
++            isinstance(row.end_ms, bool)
++            or not isinstance(row.end_ms, int)
++            or row.end_ms <= row.start_ms
++        ):
++            raise InvalidExportError(
++                "chapter end must be a later millisecond offset",
++                code="audioexport.chapters_invalid",
++            )
++        previous_start = row.start_ms
++    return rows
++
++
++def _resolve_tracks(
++    inputs: Sequence[Path | str | AudiobookTrack] | Path | str | AudiobookTrack,
++) -> tuple[tuple[Path, ...], tuple[str | None, ...], bool]:
++    if isinstance(inputs, (Path, str, AudiobookTrack)):
++        requested: tuple[Path | str | AudiobookTrack, ...] = (inputs,)
++    else:
++        requested = tuple(inputs)
++    if not requested:
++        raise InvalidExportError(
++            "at least one audiobook input is required", code="audioexport.audiobook_no_inputs"
++        )
++    paths: list[Path | str] = []
++    title_by_path: dict[Path, str] = {}
++    for item in requested:
++        if isinstance(item, AudiobookTrack):
++            candidate = Path(item.path).expanduser()
++            if candidate.is_dir() and item.title is not None:
++                raise InvalidExportError(
++                    "an explicit track title cannot be applied to a directory input",
++                    code="audioexport.audiobook_input_invalid",
++                )
++            resolved = candidate.resolve()
++            if item.title is not None:
++                title_by_path[resolved] = item.title.strip()
++            paths.append(candidate)
++        elif isinstance(item, (Path, str)):
++            paths.append(item)
++        else:
++            raise InvalidExportError(
++                "audiobook inputs must be paths or AudiobookTrack objects",
++                code="audioexport.audiobook_input_invalid",
++            )
++    discovered = discover_audio_inputs(paths)
++    explicit_titles = tuple(title_by_path.get(path) for path in discovered)
++    single_directory = (
++        len(requested) == 1
++        and Path(requested[0].path if isinstance(requested[0], AudiobookTrack) else requested[0])
++        .expanduser()
++        .is_dir()
++    )
++    return discovered, explicit_titles, single_directory
++
++
++def _verify_normalized(
++    path: Path,
++    *,
++    ffprobe: str,
++    sample_rate: int,
++    channels: int,
++    label: str,
++) -> int:
++    info = probe(path, ffprobe)
++    codec, actual_rate, actual_channels, duration = _audio_properties(info, label=label)
++    if codec != "aac" or actual_rate != sample_rate or actual_channels != channels:
++        raise VerificationError(
++            f"{label} does not match the selected AAC settings", code="audioexport.segment_mismatch"
++        )
++    if any(item.get("codec_type") != "audio" for item in info["streams"]):
++        raise VerificationError(
++            f"{label} unexpectedly contains non-audio streams", code="audioexport.segment_mismatch"
++        )
++    return duration
++
++
++def _normalize_segment(
++    source: Path,
++    destination: Path,
++    *,
++    ffmpeg: str,
++    ffprobe: str,
++    bitrate: str,
++    sample_rate: int,
++    channels: int,
++    encoder: str,
++) -> int:
++    command = [
++        ffmpeg,
++        "-hide_banner",
++        "-loglevel",
++        "error",
++        "-nostdin",
++        "-y",
++        "-i",
++        str(source),
++        "-map",
++        "0:a:0",
++        "-vn",
++        "-sn",
++        "-dn",
++        "-map_metadata",
++        "-1",
++        "-map_chapters",
++        "-1",
++        "-c:a",
++        encoder,
++        *encoder_options(encoder),
++        "-b:a",
++        bitrate,
++        "-ar",
++        str(sample_rate),
++        "-ac",
++        str(channels),
++        "-movflags",
++        "+faststart",
++        "-f",
++        "ipod",
++        str(destination),
++    ]
++    try:
++        run(command)
++    except EncodingError as exc:
++        raise EncodingError(
++            f"could not normalize audiobook track {source.name}: {exc}",
++            code="audioexport.audiobook_segment_failed",
++        ) from exc
++    return _verify_normalized(
++        destination,
++        ffprobe=ffprobe,
++        sample_rate=sample_rate,
++        channels=channels,
++        label=f"normalized segment {source.name}",
++    )
++
++
++def _concat_file_line(path: Path) -> str:
++    if "\n" in str(path) or "\r" in str(path):
++        raise InvalidExportError(
++            "track paths containing line breaks cannot be concatenated",
++            code="audioexport.audiobook_input_invalid",
++        )
++    escaped = str(path).replace("\\", "\\\\").replace("'", "'\\''")
++    return f"file '{escaped}'\n"
++
++
++def _concat_segments(
++    segments: Sequence[Path],
++    destination: Path,
++    *,
++    ffmpeg: str,
++    ffprobe: str,
++    sample_rate: int,
++    channels: int,
++    expected_duration_ms: int,
++) -> int:
++    list_path = destination.with_name("segments.txt")
++    try:
++        list_path.write_text(
++            "".join(_concat_file_line(item) for item in segments), encoding="utf-8"
++        )
++    except OSError as exc:
++        raise EncodingError(
++            f"could not stage audiobook segment list: {exc}",
++            code="audioexport.audiobook_concat_failed",
++        ) from exc
++    try:
++        run(
++            [
++                ffmpeg,
++                "-hide_banner",
++                "-loglevel",
++                "error",
++                "-nostdin",
++                "-y",
++                "-f",
++                "concat",
++                "-safe",
++                "0",
++                "-i",
++                str(list_path),
++                "-map",
++                "0:a:0",
++                "-c:a",
++                "copy",
++                "-map_metadata",
++                "-1",
++                "-map_chapters",
++                "-1",
++                "-movflags",
++                "+faststart",
++                "-f",
++                "ipod",
++                str(destination),
++            ]
++        )
++    except EncodingError as exc:
++        raise EncodingError(
++            f"could not concatenate audiobook segments: {exc}",
++            code="audioexport.audiobook_concat_failed",
++        ) from exc
++    info = probe(destination, ffprobe)
++    codec, actual_rate, actual_channels, duration = _audio_properties(
++        info, label="concatenated audiobook"
++    )
++    if codec != "aac" or actual_rate != sample_rate or actual_channels != channels:
++        raise VerificationError(
++            "concatenated audio does not match the selected AAC settings",
++            code="audioexport.audiobook_concat_mismatch",
++        )
++    if any(item.get("codec_type") != "audio" for item in info["streams"]):
++        raise VerificationError(
++            "concatenated audio contains non-audio streams",
++            code="audioexport.audiobook_concat_mismatch",
++        )
++    tolerance = max(500, len(segments) * 50, round(expected_duration_ms * 0.02))
++    if abs(duration - expected_duration_ms) > tolerance:
++        raise VerificationError(
++            "concatenated duration differs substantially from normalized segments",
++            code="audioexport.audiobook_concat_mismatch",
++        )
++    return duration
++
++
++def _auto_sidecars(directory: Path) -> tuple[Path | None, Path | None]:
++    cover = next(
++        (
++            directory / name
++            for name in ("cover.jpg", "cover.jpeg", "cover.png")
++            if (directory / name).is_file()
++        ),
++        None,
++    )
++    chapters = directory / "chapters.txt"
++    return cover, chapters if chapters.is_file() else None
++
++
++def _read_explicit_chapters(
++    chapters: Sequence[Chapter] | None, chapters_file: Path | None
++) -> tuple[Chapter, ...] | None:
++    if chapters is not None:
++        return _validate_chapter_rows(chapters)
++    if chapters_file is None:
++        return None
++    loaded = (
++        load_chapters_txt(chapters_file)
++        if chapters_file.suffix.casefold() == ".txt"
++        else load_chapters(chapters_file)
++    )
++    return _validate_chapter_rows(loaded)
++
++
++def _build_unlocked(
++    inputs: Sequence[Path | str | AudiobookTrack] | Path | str | AudiobookTrack,
++    output: Path,
++    *,
++    metadata: AudiobookMetadata | Mapping[str, str] | None,
++    cover: Path | str | None,
++    chapters: Sequence[Chapter] | None,
++    chapters_file: Path | str | None,
++    bitrate: str | int | None,
++    sample_rate: int | None,
++    channels: int | None,
++    force: bool,
++    ffmpeg: Path | str | None,
++    ffprobe: Path | str | None,
++    discover_sidecars: bool,
++    use_filenames_as_chapters: bool,
++) -> AudiobookResult:
++    destination = output.expanduser().absolute()
++    if destination.suffix.casefold() != ".m4b":
++        raise InvalidExportError(
++            "audiobook output must use the .m4b extension",
++            code="audioexport.audiobook_output_invalid",
++        )
++    if chapters is not None and chapters_file is not None:
++        raise InvalidExportError(
++            "use chapters or chapters_file, not both",
++            code="audioexport.audiobook_chapters_conflict",
++        )
++
++    requested_inputs = (
++        (inputs,) if isinstance(inputs, (Path, str, AudiobookTrack)) else tuple(inputs)
++    )
++    track_paths, explicit_titles, single_directory = _resolve_tracks(requested_inputs)
++    destination_real = destination.resolve()
++    for source in track_paths:
++        if source.resolve() == destination_real:
++            raise InvalidExportError(
++                "input and output must be different files", code="audioexport.same_path"
++            )
++
++    discovered_resources: list[str] = []
++    selected_cover = Path(cover).expanduser() if cover is not None else None
++    selected_chapters_file = Path(chapters_file).expanduser() if chapters_file is not None else None
++    if discover_sidecars and single_directory:
++        directory_input = requested_inputs[0]
++        directory_path = (
++            directory_input.path if isinstance(directory_input, AudiobookTrack) else directory_input
++        )
++        directory = Path(directory_path).expanduser().resolve()
++        auto_cover, auto_chapters = _auto_sidecars(directory)
++        if selected_cover is None and auto_cover is not None:
++            selected_cover = auto_cover
++            discovered_resources.append(auto_cover.name)
++        if chapters is None and selected_chapters_file is None and auto_chapters is not None:
++            selected_chapters_file = auto_chapters
++            discovered_resources.append(auto_chapters.name)
++
++    cover_path: Path | None = None
++    cover_codec: str | None = None
++    if selected_cover is not None:
++        try:
++            cover_path = selected_cover.resolve(strict=True)
++        except (OSError, RuntimeError) as exc:
++            raise InvalidExportError(
++                f"cover image does not exist: {selected_cover}", code="audioexport.cover_invalid"
++            ) from exc
++        if not cover_path.is_file() or cover_path == destination_real:
++            raise InvalidExportError("cover image is invalid", code="audioexport.cover_invalid")
++        cover_codec = _cover_kind(cover_path)
++
++    chapters_path: Path | None = None
++    chapters_file_sha: str | None = None
++    if selected_chapters_file is not None:
++        try:
++            chapters_path = selected_chapters_file.resolve(strict=True)
++        except (OSError, RuntimeError) as exc:
++            raise InvalidExportError(
++                f"chapter file does not exist: {selected_chapters_file}",
++                code="audioexport.chapters_invalid",
++            ) from exc
++        if not chapters_path.is_file() or chapters_path == destination_real:
++            raise InvalidExportError("chapter file is invalid", code="audioexport.chapters_invalid")
++        chapters_file_sha = sha256_file(chapters_path)
++
++    explicit_chapters = _read_explicit_chapters(chapters, chapters_path)
++    tags = audiobook_tags(metadata)
++    if sample_rate is not None and (
++        isinstance(sample_rate, bool)
++        or not isinstance(sample_rate, int)
++        or not 8000 <= sample_rate <= 384000
++    ):
++        raise InvalidExportError(
++            "sample rate must be an integer between 8000 and 384000",
++            code="audioexport.audiobook_input_invalid",
++        )
++    if channels is not None and (
++        isinstance(channels, bool) or not isinstance(channels, int) or channels not in (1, 2)
++    ):
++        raise InvalidExportError(
++            "audiobook channels must be 1 or 2", code="audioexport.audiobook_input_invalid"
++        )
++    rate = normalize_bitrate(bitrate, "m4b")
++    assert rate is not None
++
++    if destination.is_symlink():
++        raise InvalidExportError(
++            "refusing to replace symlink output", code="audioexport.output_invalid"
++        )
++    sidecar = _manifest_path(destination)
++    if sidecar.is_symlink() or (sidecar.exists() and not sidecar.is_file()):
++        raise InvalidExportError(
++            "manifest sidecar must be a regular non-symlink file", code="audioexport.output_invalid"
++        )
++    if destination.exists() and not destination.is_file():
++        raise InvalidExportError("output must be a regular file", code="audioexport.output_invalid")
++
++    ffmpeg_exe = executable("ffmpeg", ffmpeg)
++    ffprobe_exe = executable("ffprobe", ffprobe)
++    ffmpeg_version = version(ffmpeg_exe)
++    ffprobe_version = version(ffprobe_exe)
++    encoder = encoder_for_format("m4b", ffmpeg_exe)
++
++    source_characteristics: list[tuple[int, int]] = []
++    source_hashes: list[str] = []
++    source_titles: list[str | None] = []
++    for source in track_paths:
++        info = probe(source, ffprobe_exe)
++        _, source_rate, source_channels, _ = _audio_properties(info, label=f"source {source.name}")
++        source_characteristics.append((source_rate, source_channels))
++        source_hashes.append(sha256_file(source))
++        source_titles.append(source_title(info))
++
++    target_rate = sample_rate if sample_rate is not None else source_characteristics[0][0]
++    target_channels = channels if channels is not None else source_characteristics[0][1]
++    if not 8000 <= target_rate <= 384000:
++        raise InvalidExportError(
++            "selected sample rate must be between 8000 and 384000",
++            code="audioexport.audiobook_input_invalid",
++        )
++    if target_channels not in (1, 2):
++        raise InvalidExportError(
++            "selected channel count must be 1 or 2", code="audioexport.audiobook_input_invalid"
++        )
++
++    effective_titles = tuple(
++        explicit or (tag_title if not use_filenames_as_chapters else None) or source.stem
++        for source, explicit, tag_title in zip(track_paths, explicit_titles, source_titles)
++    )
++    if explicit_chapters is None:
++        chapter_request: Any = {
++            "mode": "tracks",
++            "title_source": "filename" if use_filenames_as_chapters else "tag",
++            "titles": list(effective_titles),
++        }
++    else:
++        chapter_request = [asdict(row) for row in explicit_chapters]
++
++    resource_options = {
++        "cover_sha256": sha256_file(cover_path) if cover_path is not None else None,
++        "chapters_file_sha256": chapters_file_sha,
++        "chapters_file_name": chapters_path.name if chapters_path is not None else None,
++        "discovered_resources": sorted(discovered_resources),
++    }
++    producer_version = _producer_version()
++    source_records = [
++        {
++            "name": path.name,
++            "sha256": digest,
++            "explicit_title": explicit_titles[index],
++            "source_title": source_titles[index],
++            "chapter_title": effective_titles[index],
++        }
++        for index, (path, digest) in enumerate(zip(track_paths, source_hashes))
++    ]
++    options = {
++        "format": "m4b",
++        "codec": "aac",
++        "encoder": encoder,
++        "bitrate": rate,
++        "sample_rate": target_rate,
++        "channels": target_channels,
++        "metadata": tags,
++        "resources": resource_options,
++        "chapter_request": chapter_request,
++    }
++    request_id = _canonical_hash(
++        {
++            "schema": "audioexport.audiobook-request.v1",
++            "sources": source_records,
++            "options": options,
++            "ffmpeg": ffmpeg_version,
++            "ffprobe": ffprobe_version,
++            "producer_version": producer_version,
++        }
++    )
++
++    old = _load_audiobook_manifest(sidecar)
++    intact = (
++        destination.is_file()
++        and old is not None
++        and old.get("output_sha256") == sha256_file(destination)
++    )
++    if destination.exists() and not force and not intact:
++        raise FileExistsError(
++            f"existing output is not an intact audiobook artifact: {destination}; use --force"
++        )
++    if not force and intact and old is not None and old.get("request_id") == request_id:
++        verified = old.get("verified", {})
++        return AudiobookResult(
++            destination,
++            str(old.get("export_id", "")),
++            str(old["output_sha256"]),
++            sidecar,
++            True,
++            int(verified.get("chapters", 0)),
++            int(verified.get("track_count", len(track_paths))),
++            int(verified.get("duration_ms", 0)),
++            str(verified.get("codec", "aac")),
++            tuple(discovered_resources),
++        )
++
++    destination.parent.mkdir(parents=True, exist_ok=True)
++    work_dir = Path(
++        tempfile.mkdtemp(prefix=f".{destination.stem}.audioexport-", dir=destination.parent)
++    )
++    final_temp: Path | None = None
++    try:
++        segments: list[Path] = []
++        normalized_durations: list[int] = []
++        for index, source in enumerate(track_paths, 1):
++            segment = work_dir / f"segment-{index:04d}.m4a"
++            duration = _normalize_segment(
++                source,
++                segment,
++                ffmpeg=ffmpeg_exe,
++                ffprobe=ffprobe_exe,
++                bitrate=rate,
++                sample_rate=target_rate,
++                channels=target_channels,
++                encoder=encoder,
++            )
++            segments.append(segment)
++            normalized_durations.append(duration)
++
++        concat_audio = work_dir / "concatenated.m4a"
++        concat_duration = _concat_segments(
++            segments,
++            concat_audio,
++            ffmpeg=ffmpeg_exe,
++            ffprobe=ffprobe_exe,
++            sample_rate=target_rate,
++            channels=target_channels,
++            expected_duration_ms=sum(normalized_durations),
++        )
++        if explicit_chapters is None:
++            requested_chapters = build_track_chapters(
++                tuple(zip(effective_titles, normalized_durations))
++            )
++        else:
++            requested_chapters = explicit_chapters
++        resolved_chapters = normalize_chapters(requested_chapters, concat_duration)
++
++        fd, temp_name = tempfile.mkstemp(
++            prefix=f".{destination.stem}.", suffix=".m4b", dir=destination.parent
++        )
++        os.close(fd)
++        final_temp = Path(temp_name)
++        final_temp.unlink()
++        chapter_metadata: Path | None = None
++        if resolved_chapters:
++            chapter_metadata = work_dir / "chapters.ffmeta"
++            chapter_metadata.write_text(ffmetadata_text(resolved_chapters), encoding="utf-8")
++
++        command = [
++            ffmpeg_exe,
++            "-hide_banner",
++            "-loglevel",
++            "error",
++            "-nostdin",
++            "-y",
++            "-i",
++            str(concat_audio),
++        ]
++        if chapter_metadata is not None:
++            command.extend(["-f", "ffmetadata", "-i", str(chapter_metadata)])
++        cover_index = 2 if chapter_metadata is not None else 1
++        if cover_path is not None:
++            command.extend(["-i", str(cover_path)])
++        command.extend(["-map", "0:a:0", "-map_metadata", "0"])
++        if chapter_metadata is not None:
++            command.extend(["-map_chapters", "1"])
++        else:
++            command.extend(["-map_chapters", "-1"])
++        if cover_path is not None:
++            command.extend(
++                [
++                    "-map",
++                    f"{cover_index}:v:0",
++                    "-c:v",
++                    cover_codec or "mjpeg",
++                    "-disposition:v:0",
++                    "attached_pic",
++                ]
++            )
++        command.extend(["-c:a", "copy"])
++        for key, value in tags.items():
++            command.extend(["-metadata", f"{key}={value}"])
++        command.extend(["-movflags", "+faststart", "-f", "ipod", str(final_temp)])
++        try:
++            run(command)
++        except EncodingError as exc:
++            raise EncodingError(
++                f"could not mux final audiobook: {exc}", code="audioexport.audiobook_mux_failed"
++            ) from exc
++
++        final_info = _verify_output(
++            final_temp,
++            fmt="m4b",
++            chapters=resolved_chapters,
++            cover=cover_path,
++            metadata=tags,
++            ffprobe=ffprobe_exe,
++            source_duration_ms=concat_duration,
++        )
++        _, final_rate, final_channels, final_duration = _audio_properties(
++            final_info, label="final audiobook"
++        )
++        if final_rate != target_rate or final_channels != target_channels:
++            raise VerificationError(
++                "final audiobook does not match the selected AAC settings",
++                code="audioexport.audiobook_output_mismatch",
++            )
++
++        export_id = _canonical_hash(
++            {
++                "schema": "audioexport.audiobook-identity.v1",
++                "request_id": request_id,
++                "chapters": [asdict(row) for row in resolved_chapters],
++                "normalized_segment_durations_ms": normalized_durations,
++            }
++        )
++        output_sha = sha256_file(final_temp)
++        manifest = {
++            "schema": "audioexport.audiobook-manifest.v1",
++            "schema_version": 1,
++            "operation": "audiobook",
++            "producer": "audioexport",
++            "producer_version": producer_version,
++            "export_id": export_id,
++            "request_id": request_id,
++            "output": destination.name,
++            "output_sha256": output_sha,
++            "sources": source_records,
++            "options": {
++                **options,
++                "chapters": [asdict(row) for row in resolved_chapters],
++            },
++            "resources": {
++                "cover": cover_path.name if cover_path is not None else None,
++                "chapters_file": chapters_path.name if chapters_path is not None else None,
++                "auto_discovered": sorted(discovered_resources),
++            },
++            "tools": {"ffmpeg": ffmpeg_version, "ffprobe": ffprobe_version},
++            "verified": {
++                "codec": EXPECTED_CODECS["m4b"],
++                "duration_ms": final_duration,
++                "channels": final_channels,
++                "sample_rate": final_rate,
++                "chapters": len(final_info.get("chapters", [])),
++                "track_count": len(track_paths),
++            },
++        }
++        _commit_export(final_temp, destination, sidecar, manifest)
++        return AudiobookResult(
++            destination,
++            export_id,
++            output_sha,
++            sidecar,
++            False,
++            len(resolved_chapters),
++            len(track_paths),
++            final_duration,
++            EXPECTED_CODECS["m4b"],
++            tuple(discovered_resources),
++        )
++    finally:
++        if final_temp is not None:
++            final_temp.unlink(missing_ok=True)
++        shutil.rmtree(work_dir, ignore_errors=True)
++
++
++def build_audiobook(
++    inputs: Sequence[Path | str | AudiobookTrack] | Path | str | AudiobookTrack,
++    output: Path | str,
++    *,
++    metadata: AudiobookMetadata | Mapping[str, str] | None = None,
++    cover: Path | str | None = None,
++    chapters: Sequence[Chapter] | None = None,
++    chapters_file: Path | str | None = None,
++    bitrate: str | int | None = None,
++    sample_rate: int | None = None,
++    channels: int | None = None,
++    force: bool = False,
++    ffmpeg: Path | str | None = None,
++    ffprobe: Path | str | None = None,
++    discover_sidecars: bool = False,
++    use_filenames_as_chapters: bool = False,
++) -> AudiobookResult:
++    """Assemble ordered source tracks into a verified, transactionally committed M4B."""
++    destination = Path(output).expanduser().absolute()
++    with _output_lock(destination):
++        return _build_unlocked(
++            inputs,
++            destination,
++            metadata=metadata,
++            cover=cover,
++            chapters=chapters,
++            chapters_file=chapters_file,
++            bitrate=bitrate,
++            sample_rate=sample_rate,
++            channels=channels,
++            force=force,
++            ffmpeg=ffmpeg,
++            ffprobe=ffprobe,
++            discover_sidecars=discover_sidecars,
++            use_filenames_as_chapters=use_filenames_as_chapters,
++        )
+diff --git a/audioexport/audiobook_profile.py b/audioexport/audiobook_profile.py
+new file mode 100644
+index 0000000..cca7b92
+--- /dev/null
++++ b/audioexport/audiobook_profile.py
+@@ -0,0 +1,271 @@
++"""Strict, portable TOML configuration for audiobook assembly."""
++
++from __future__ import annotations
++
++import os
++import sys
++from collections.abc import Mapping
++from dataclasses import dataclass, fields, replace
++from pathlib import Path, PureWindowsPath
++from typing import Any
++
++from .errors import InvalidExportError
++from .formats import normalize_bitrate
++from .inputs import SUPPORTED_AUDIO_EXTENSIONS
++from .metadata import AudiobookMetadata, audiobook_tags
++
++if sys.version_info >= (3, 11):
++    import tomllib
++else:  # pragma: no cover - Python 3.10
++    import tomli as tomllib
++
++
++@dataclass(frozen=True, slots=True)
++class AudiobookAudioOptions:
++    bitrate: str | None = None
++    sample_rate: int | None = None
++    channels: int | None = None
++
++
++@dataclass(frozen=True, slots=True)
++class AudiobookProfile:
++    path: Path
++    output: Path
++    inputs: tuple[Path, ...]
++    cover: Path | None
++    chapters_file: Path | None
++    audio: AudiobookAudioOptions
++    metadata: AudiobookMetadata
++    chapter_mode: str = "tracks"
++    title_source: str = "tag"
++
++
++def _profile_error(message: str, exc: BaseException | None = None) -> InvalidExportError:
++    error = InvalidExportError(message, code="audioexport.audiobook_profile_invalid")
++    if exc is not None:
++        error.__cause__ = exc
++    return error
++
++
++def _path_text(value: Any, field: str) -> str:
++    if not isinstance(value, str) or not value.strip():
++        raise _profile_error(f"{field} must be a non-empty path")
++    if "\x00" in value or any(character in value for character in "*?[]{}"):
++        raise _profile_error(f"{field} must be an explicit path, not a glob or template")
++    path_parts = (*Path(value).parts, *PureWindowsPath(value).parts)
++    if ".." in path_parts:
++        raise _profile_error(f"{field} must not traverse parent directories")
++    return value
++
++
++def _resolve_path(value: Any, root: Path, field: str, *, must_exist: bool) -> Path:
++    text = _path_text(value, field)
++    candidate = Path(text).expanduser()
++    if not candidate.is_absolute():
++        candidate = root / candidate
++    try:
++        return candidate.resolve(strict=must_exist)
++    except (OSError, RuntimeError) as exc:
++        raise _profile_error(f"{field} does not resolve to a usable path: {text}", exc) from exc
++
++
++def _resolve_output(value: Any, root: Path) -> Path:
++    text = _path_text(value, "output")
++    candidate = Path(text).expanduser()
++    if not candidate.is_absolute():
++        candidate = root / candidate
++    return candidate.absolute()
++
++
++def _resource_file(value: Any, root: Path, field: str) -> Path:
++    path = _resolve_path(value, root, field, must_exist=True)
++    if not path.is_file():
++        raise _profile_error(f"{field} must be an existing file: {path}")
++    return path
++
++
++def _validate_audio(raw: Any) -> AudiobookAudioOptions:
++    if not isinstance(raw, dict) or set(raw) - {"bitrate", "sample_rate", "channels"}:
++        raise _profile_error("[audio] contains unknown fields or is not a table")
++    bitrate = raw.get("bitrate")
++    if bitrate is not None:
++        if isinstance(bitrate, bool) or not isinstance(bitrate, (int, str)):
++            raise _profile_error("audio.bitrate must be an integer or string")
++        try:
++            bitrate = normalize_bitrate(bitrate, "m4b")
++        except InvalidExportError as exc:
++            raise _profile_error(f"invalid audio.bitrate: {exc}", exc) from exc
++    sample_rate = raw.get("sample_rate")
++    if sample_rate is not None and (
++        isinstance(sample_rate, bool)
++        or not isinstance(sample_rate, int)
++        or not 8000 <= sample_rate <= 384000
++    ):
++        raise _profile_error("audio.sample_rate must be an integer from 8000 to 384000")
++    channels = raw.get("channels")
++    if channels is not None and (
++        isinstance(channels, bool) or not isinstance(channels, int) or channels not in (1, 2)
++    ):
++        raise _profile_error("audio.channels must be 1 or 2")
++    return AudiobookAudioOptions(bitrate, sample_rate, channels)
++
++
++def _validate_metadata(raw: Any) -> AudiobookMetadata:
++    if not isinstance(raw, dict):
++        raise _profile_error("[metadata] must be a table")
++    canonical = {item.name for item in fields(AudiobookMetadata)} - {"extra"}
++    if set(raw) - canonical - {"extra"}:
++        raise _profile_error(f"unknown metadata fields: {sorted(set(raw) - canonical - {'extra'})}")
++    values: dict[str, str | None] = {}
++    for key in canonical:
++        value = raw.get(key)
++        if value is not None and not isinstance(value, str):
++            raise _profile_error(f"metadata.{key} must be a string")
++        values[key] = value
++    extra = raw.get("extra", {})
++    if not isinstance(extra, dict) or any(
++        not isinstance(k, str) or not isinstance(v, str) for k, v in extra.items()
++    ):
++        raise _profile_error("metadata.extra must contain string key/value pairs")
++    try:
++        result = AudiobookMetadata(**values, extra=extra)
++        audiobook_tags(result)
++    except (TypeError, InvalidExportError) as exc:
++        raise _profile_error(f"invalid audiobook metadata: {exc}", exc) from exc
++    return result
++
++
++def load_audiobook_profile(path: Path | str) -> AudiobookProfile:
++    """Load and fully validate an audioexport.audiobook.v1 TOML profile."""
++    profile_path = Path(path).expanduser().resolve()
++    try:
++        with profile_path.open("rb") as stream:
++            raw = tomllib.load(stream)
++    except (OSError, tomllib.TOMLDecodeError) as exc:
++        raise _profile_error(f"cannot load audiobook profile: {exc}", exc) from exc
++    if not isinstance(raw, dict) or raw.get("schema") != "audioexport.audiobook.v1":
++        raise _profile_error("expected schema='audioexport.audiobook.v1'")
++    allowed = {
++        "schema",
++        "output",
++        "inputs",
++        "cover",
++        "chapters_file",
++        "audio",
++        "metadata",
++        "chapters",
++    }
++    extra_root = set(raw) - allowed
++    if extra_root:
++        raise _profile_error(f"unknown audiobook profile fields: {sorted(extra_root)}")
++
++    root = profile_path.parent
++    output = _resolve_output(raw.get("output"), root)
++    if output.suffix.casefold() != ".m4b":
++        raise _profile_error("output must use the .m4b extension")
++
++    input_values = raw.get("inputs")
++    if not isinstance(input_values, list) or not input_values:
++        raise _profile_error("inputs must be a non-empty ordered array of files")
++    inputs: list[Path] = []
++    for index, value in enumerate(input_values, 1):
++        source = _resource_file(value, root, f"inputs[{index}]")
++        if source.suffix.casefold() not in SUPPORTED_AUDIO_EXTENSIONS:
++            raise _profile_error(f"inputs[{index}] has an unsupported audio extension")
++        inputs.append(source)
++    identities = [os.path.normcase(str(item)) for item in inputs]
++    if len(identities) != len(set(identities)):
++        raise _profile_error("inputs contains duplicate resolved paths")
++
++    cover = _resource_file(raw["cover"], root, "cover") if "cover" in raw else None
++    chapters_file = (
++        _resource_file(raw["chapters_file"], root, "chapters_file")
++        if "chapters_file" in raw
++        else None
++    )
++    audio = _validate_audio(raw.get("audio", {}))
++    metadata = _validate_metadata(raw.get("metadata", {}))
++
++    chapter_table = raw.get("chapters", {})
++    if not isinstance(chapter_table, dict) or set(chapter_table) - {"mode", "title_source"}:
++        raise _profile_error("[chapters] contains unknown fields or is not a table")
++    chapter_mode = chapter_table.get("mode", "tracks")
++    title_source = chapter_table.get("title_source", "tag")
++    if not isinstance(chapter_mode, str) or chapter_mode not in {"tracks", "explicit", "none"}:
++        raise _profile_error("chapters.mode must be tracks, explicit, or none")
++    if not isinstance(title_source, str) or title_source not in {"tag", "filename"}:
++        raise _profile_error("chapters.title_source must be tag or filename")
++    if chapter_mode == "explicit" and chapters_file is None:
++        raise _profile_error("chapters.mode='explicit' requires chapters_file")
++    if chapter_mode != "explicit" and chapters_file is not None:
++        raise _profile_error("chapters_file requires chapters.mode='explicit'")
++    return AudiobookProfile(
++        profile_path,
++        output,
++        tuple(inputs),
++        cover,
++        chapters_file,
++        audio,
++        metadata,
++        chapter_mode,
++        title_source,
++    )
++
++
++def resolve_profile_overrides(
++    profile: AudiobookProfile,
++    *,
++    output: Path | str | None = None,
++    metadata: Mapping[str, str] | None = None,
++    cover: Path | str | None = None,
++    chapters_file: Path | str | None = None,
++    bitrate: str | int | None = None,
++    sample_rate: int | None = None,
++    channels: int | None = None,
++    use_filenames_as_chapters: bool = False,
++) -> AudiobookProfile:
++    """Apply CLI-supplied values over profile values without changing input order."""
++    canonical = {item.name for item in fields(AudiobookMetadata)} - {"extra"}
++    values = {name: getattr(profile.metadata, name) for name in canonical}
++    extras = dict(profile.metadata.extra)
++    for key, value in (metadata or {}).items():
++        if not isinstance(key, str) or not isinstance(value, str):
++            raise InvalidExportError(
++                "CLI audiobook metadata must contain string key/value pairs",
++                code="audioexport.audiobook_metadata_invalid",
++            )
++        if key in canonical:
++            values[key] = value
++        else:
++            extras[key] = value
++    merged_metadata = AudiobookMetadata(**values, extra=extras)
++    audiobook_tags(merged_metadata)
++
++    merged_audio = replace(
++        profile.audio,
++        bitrate=normalize_bitrate(bitrate, "m4b") if bitrate is not None else profile.audio.bitrate,
++        sample_rate=sample_rate if sample_rate is not None else profile.audio.sample_rate,
++        channels=channels if channels is not None else profile.audio.channels,
++    )
++    # Reuse the profile validators for override-only values.
++    _validate_audio(
++        {
++            "bitrate": merged_audio.bitrate,
++            "sample_rate": merged_audio.sample_rate,
++            "channels": merged_audio.channels,
++        }
++    )
++    return replace(
++        profile,
++        output=Path(output).expanduser().absolute() if output is not None else profile.output,
++        cover=Path(cover).expanduser().resolve() if cover is not None else profile.cover,
++        chapters_file=(
++            Path(chapters_file).expanduser().resolve()
++            if chapters_file is not None
++            else profile.chapters_file
++        ),
++        audio=merged_audio,
++        metadata=merged_metadata,
++        chapter_mode="explicit" if chapters_file is not None else profile.chapter_mode,
++        title_source="filename" if use_filenames_as_chapters else profile.title_source,
++    )
+diff --git a/audioexport/chapters.py b/audioexport/chapters.py
+index 59c2e45..392b798 100644
+--- a/audioexport/chapters.py
++++ b/audioexport/chapters.py
+@@ -4,6 +4,7 @@ from __future__ import annotations
+
+ import json
+ import math
++import re
+ from collections.abc import Sequence
+ from dataclasses import dataclass
+ from pathlib import Path
+@@ -157,3 +158,68 @@ def ffmetadata_text(chapters: Sequence[Chapter]) -> str:
+             )
+         )
+     return "\n".join(lines)
++
++
++_CHAPTERS_TXT_LINE = re.compile(r"^(\d{2,}):([0-5]\d):([0-5]\d)\.(\d{3})\s+(.+)$")
++
++
++def load_chapters_txt(path: Path | str) -> tuple[Chapter, ...]:
++    """Load timestamp/title rows from a UTF-8 chapters.txt file."""
++    source = Path(path)
++    try:
++        text = source.read_text(encoding="utf-8")
++    except (OSError, UnicodeDecodeError) as exc:
++        raise InvalidExportError(
++            f"invalid chapters file {source}: {exc}", code="audioexport.chapters_invalid"
++        ) from exc
++
++    chapters: list[Chapter] = []
++    previous_start = -1
++    for line_number, raw_line in enumerate(text.splitlines(), 1):
++        line = raw_line.strip()
++        if not line or line.startswith("#"):
++            continue
++        match = _CHAPTERS_TXT_LINE.fullmatch(line)
++        if match is None:
++            raise InvalidExportError(
++                f"invalid chapters.txt line {line_number}", code="audioexport.chapters_invalid"
++            )
++        hours, minutes, seconds, milliseconds, raw_title = match.groups()
++        start_ms = ((int(hours) * 60 + int(minutes)) * 60 + int(seconds)) * 1000 + int(milliseconds)
++        title = raw_title.strip()
++        if not title or start_ms <= previous_start:
++            raise InvalidExportError(
++                f"chapters.txt line {line_number} has an empty title or non-monotonic timestamp",
++                code="audioexport.chapters_invalid",
++            )
++        chapters.append(Chapter(title, start_ms))
++        previous_start = start_ms
++    if not chapters:
++        raise InvalidExportError(
++            "chapters.txt contains no chapter entries", code="audioexport.chapters_invalid"
++        )
++    return tuple(chapters)
++
++
++def build_track_chapters(rows: Sequence[tuple[str, int]]) -> tuple[Chapter, ...]:
++    """Build one chapter per (title, normalized duration_ms) pair."""
++    if not rows:
++        raise InvalidExportError(
++            "cannot build chapters without tracks", code="audioexport.chapters_invalid"
++        )
++    chapters: list[Chapter] = []
++    offset_ms = 0
++    for title, duration_ms in rows:
++        if (
++            not isinstance(title, str)
++            or not title.strip()
++            or isinstance(duration_ms, bool)
++            or not isinstance(duration_ms, int)
++            or duration_ms <= 0
++        ):
++            raise InvalidExportError(
++                "track chapter title and duration are invalid", code="audioexport.chapters_invalid"
++            )
++        chapters.append(Chapter(title.strip(), offset_ms))
++        offset_ms += duration_ms
++    return tuple(chapters)
+diff --git a/audioexport/cli.py b/audioexport/cli.py
+index 9712193..777fb9e 100644
+--- a/audioexport/cli.py
++++ b/audioexport/cli.py
+@@ -5,14 +5,17 @@ from __future__ import annotations
+ import argparse
+ import json
+ import sys
+-from collections.abc import Sequence
++from collections.abc import Mapping, Sequence
+ from pathlib import Path
+ from typing import Any
+
+ from . import __version__
++from .audiobook import build_audiobook
++from .audiobook_profile import load_audiobook_profile, resolve_profile_overrides
+ from .errors import AudioExportError
+ from .fftools import doctor, probe
+ from .formats import FORMATS
++from .metadata import AudiobookMetadata
+ from .pipeline import encode, run_profile
+
+
+@@ -51,6 +54,38 @@ def _parser() -> argparse.ArgumentParser:
+     run_parser.add_argument("--ffmpeg")
+     run_parser.add_argument("--ffprobe")
+
++    audiobook = sub.add_parser(
++        "audiobook", help="Assemble ordered tracks or a directory into one audiobook M4B"
++    )
++    audiobook.add_argument("inputs", type=Path, nargs="*")
++    audiobook.add_argument("-o", "--output", type=Path)
++    audiobook.add_argument("--profile", type=Path)
++    audiobook.add_argument("--bitrate")
++    audiobook.add_argument("--sample-rate", type=int)
++    audiobook.add_argument("--channels", type=int, choices=(1, 2))
++    audiobook.add_argument("--title")
++    audiobook.add_argument("--author", "--artist", dest="author")
++    audiobook.add_argument("--album")
++    audiobook.add_argument("--album-artist")
++    audiobook.add_argument("--writer")
++    audiobook.add_argument("--genre")
++    audiobook.add_argument("--description")
++    audiobook.add_argument("--long-description")
++    audiobook.add_argument("--comment")
++    audiobook.add_argument("--copyright")
++    audiobook.add_argument("--encoded-by")
++    audiobook.add_argument("--language")
++    audiobook.add_argument("--publisher")
++    audiobook.add_argument("--grouping")
++    audiobook.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
++    audiobook.add_argument("--cover", type=Path)
++    audiobook.add_argument("--chapters-file", type=Path)
++    audiobook.add_argument("--use-filenames-as-chapters", action="store_true")
++    audiobook.add_argument("--no-auto-sidecars", action="store_true")
++    audiobook.add_argument("--force", action="store_true")
++    audiobook.add_argument("--json", action="store_true")
++    audiobook.add_argument("--ffmpeg")
++    audiobook.add_argument("--ffprobe")
+     inspect = sub.add_parser("inspect", help="Inspect audio and audioexport sidecar")
+     inspect.add_argument("input", type=Path)
+     inspect.add_argument("--json", action="store_true")
+@@ -127,6 +162,107 @@ def main(argv: Sequence[str] | None = None) -> int:
+             )
+             _print([item.to_dict() for item in results], as_json=args.json)
+             return 0
++        if args.command == "audiobook":
++            metadata_values: dict[str, str] = {}
++            for item in args.metadata:
++                if "=" not in item:
++                    raise AudioExportError(
++                        "--metadata requires KEY=VALUE",
++                        code="audioexport.audiobook_metadata_invalid",
++                    )
++                key, value = item.split("=", 1)
++                metadata_values[key] = value
++            for field in (
++                "title",
++                "author",
++                "album",
++                "album_artist",
++                "writer",
++                "genre",
++                "description",
++                "long_description",
++                "comment",
++                "copyright",
++                "encoded_by",
++                "language",
++                "publisher",
++                "grouping",
++            ):
++                value = getattr(args, field)
++                if value is not None:
++                    metadata_values[field] = value
++
++            audiobook_metadata: AudiobookMetadata | Mapping[str, str]
++            if args.profile is not None:
++                if args.inputs:
++                    raise AudioExportError(
++                        "positional inputs cannot be combined with --profile",
++                        code="audioexport.audiobook_profile_invalid",
++                    )
++                profile = load_audiobook_profile(args.profile)
++                profile = resolve_profile_overrides(
++                    profile,
++                    output=args.output,
++                    metadata=metadata_values,
++                    cover=args.cover,
++                    chapters_file=args.chapters_file,
++                    bitrate=args.bitrate,
++                    sample_rate=args.sample_rate,
++                    channels=args.channels,
++                    use_filenames_as_chapters=args.use_filenames_as_chapters,
++                )
++                inputs = profile.inputs
++                output = profile.output
++                audiobook_metadata = profile.metadata
++                cover = profile.cover
++                chapters_file = profile.chapters_file
++                chapters = () if profile.chapter_mode == "none" else None
++                use_filenames = profile.title_source == "filename"
++                discover_sidecars = False
++                audio_bitrate = profile.audio.bitrate
++                audio_sample_rate = profile.audio.sample_rate
++                audio_channels = profile.audio.channels
++            else:
++                if not args.inputs:
++                    raise AudioExportError(
++                        "audioexport audiobook requires at least one input",
++                        code="audioexport.audiobook_no_inputs",
++                    )
++                if args.output is None:
++                    raise AudioExportError(
++                        "audioexport audiobook requires --output unless --profile supplies it",
++                        code="audioexport.audiobook_output_invalid",
++                    )
++                inputs = args.inputs
++                output = args.output
++                audiobook_metadata = metadata_values
++                cover = args.cover
++                chapters_file = args.chapters_file
++                chapters = None
++                use_filenames = args.use_filenames_as_chapters
++                discover_sidecars = not args.no_auto_sidecars
++                audio_bitrate = args.bitrate
++                audio_sample_rate = args.sample_rate
++                audio_channels = args.channels
++
++            audiobook_result = build_audiobook(
++                inputs,
++                output,
++                metadata=audiobook_metadata,
++                cover=cover,
++                chapters=chapters,
++                chapters_file=chapters_file,
++                bitrate=audio_bitrate,
++                sample_rate=audio_sample_rate,
++                channels=audio_channels,
++                force=args.force,
++                ffmpeg=args.ffmpeg,
++                ffprobe=args.ffprobe,
++                discover_sidecars=discover_sidecars,
++                use_filenames_as_chapters=use_filenames,
++            )
++            _print(audiobook_result.to_dict(), as_json=args.json)
++            return 0
+     except (AudioExportError, OSError, FileExistsError, ValueError, KeyError) as exc:
+         code = exc.code if isinstance(exc, AudioExportError) else "audioexport.error"
+         if getattr(args, "json", False):
+diff --git a/audioexport/fftools.py b/audioexport/fftools.py
+index 9627b47..bd35aa7 100644
+--- a/audioexport/fftools.py
++++ b/audioexport/fftools.py
+@@ -268,10 +268,31 @@ def doctor(
+         package_version = distribution_version("audioexport")
+     except PackageNotFoundError:
+         package_version = "0+uninstalled"
++    ffprobe_available = tools["ffprobe"]["available"] is True
++    ffmpeg_available = tools["ffmpeg"]["available"] is True
++    aac_available = supported["m4b"]["available"] is True
++    features = {
++        "m4b_encode": {
++            "available": ffmpeg_available and ffprobe_available and aac_available,
++            "requires": ["ffmpeg", "ffprobe", "aac"],
++        },
++        "m4b_audiobook": {
++            "available": ffmpeg_available and ffprobe_available and aac_available,
++            "requires": ["ffmpeg", "ffprobe", "aac"],
++        },
++        "m4b_stream_copy": {
++            "available": ffmpeg_available and ffprobe_available,
++            "requires": ["ffmpeg", "ffprobe"],
++        },
++    }
++    for feature in features.values():
++        if not feature["available"]:
++            feature["reason"] = "one or more required tools or encoders are unavailable"
+     return {
+         "package": {"name": "audioexport", "version": package_version},
+         "tools": tools,
+         "formats": supported,
++        "features": features,
+         "ready": all(x["available"] for x in tools.values()),
+         "all_formats_ready": all_formats_ready,
+         "requested_formats_ready": requested_formats_ready,
+diff --git a/audioexport/inputs.py b/audioexport/inputs.py
+new file mode 100644
+index 0000000..492745b
+--- /dev/null
++++ b/audioexport/inputs.py
+@@ -0,0 +1,151 @@
++"""Deterministic local source discovery for audiobook assembly."""
++
++from __future__ import annotations
++
++import os
++import re
++from collections.abc import Mapping, Sequence
++from pathlib import Path
++from typing import Any
++
++from .errors import InvalidExportError
++
++SUPPORTED_AUDIO_EXTENSIONS = frozenset(
++    {
++        ".aac",
++        ".aif",
++        ".aiff",
++        ".alac",
++        ".amr",
++        ".ape",
++        ".caf",
++        ".flac",
++        ".m4a",
++        ".m4b",
++        ".mka",
++        ".mp3",
++        ".mpc",
++        ".oga",
++        ".ogg",
++        ".opus",
++        ".wav",
++        ".wma",
++        ".webm",
++    }
++)
++
++_KNOWN_SIDECARS = frozenset(
++    {"cover.jpg", "cover.jpeg", "cover.png", "description.txt", "chapters.txt", "ffmetadata.txt"}
++)
++
++
++def natural_sort_key(path: Path | str) -> tuple[tuple[int, int | str], ...]:
++    """Return a case-stable natural key (so 2 sorts before 10)."""
++    name = Path(path).name
++    parts = re.split(r"(\d+)", name.casefold())
++    key = tuple((0, int(part)) if part.isdigit() else (1, part) for part in parts)
++    return (*key, (2, name.casefold()), (3, name))
++
++
++def discover_audio_inputs(inputs: Sequence[Path | str] | Path | str) -> tuple[Path, ...]:
++    """Resolve ordered files and expand any directories non-recursively.
++
++    Directory contents are naturally ordered and unsupported files (including
++    conventional sidecars) are ignored. Explicit file arguments must use a
++    supported audio extension.
++    """
++    if isinstance(inputs, (str, Path)):
++        requested: tuple[Path | str, ...] = (inputs,)
++    else:
++        requested = tuple(inputs)
++    if not requested:
++        raise InvalidExportError(
++            "at least one audiobook input is required", code="audioexport.audiobook_no_inputs"
++        )
++
++    resolved: list[Path] = []
++    seen: set[str] = set()
++    for raw in requested:
++        if not isinstance(raw, (str, Path)):
++            raise InvalidExportError(
++                "audiobook inputs must be file paths", code="audioexport.audiobook_input_invalid"
++            )
++        candidate = Path(raw).expanduser()
++        try:
++            source = candidate.resolve(strict=True)
++        except (OSError, RuntimeError) as exc:
++            raise InvalidExportError(
++                f"audiobook input does not exist: {candidate}",
++                code="audioexport.audiobook_input_invalid",
++            ) from exc
++
++        if source.is_dir():
++            try:
++                children = sorted(
++                    (
++                        item
++                        for item in source.iterdir()
++                        if item.is_file()
++                        and item.name.casefold() not in _KNOWN_SIDECARS
++                        and item.suffix.casefold() in SUPPORTED_AUDIO_EXTENSIONS
++                    ),
++                    key=natural_sort_key,
++                )
++            except OSError as exc:
++                raise InvalidExportError(
++                    f"could not read audiobook directory: {source}",
++                    code="audioexport.audiobook_input_invalid",
++                ) from exc
++            if not children:
++                raise InvalidExportError(
++                    f"audiobook directory contains no supported audio files: {source}",
++                    code="audioexport.audiobook_input_invalid",
++                )
++            candidates = [item.resolve() for item in children]
++        elif source.is_file():
++            if source.suffix.casefold() not in SUPPORTED_AUDIO_EXTENSIONS:
++                raise InvalidExportError(
++                    f"unsupported audiobook input extension: {source.suffix or '(none)'}",
++                    code="audioexport.audiobook_input_invalid",
++                )
++            candidates = [source]
++        else:
++            raise InvalidExportError(
++                f"audiobook input is not a regular file or directory: {candidate}",
++                code="audioexport.audiobook_input_invalid",
++            )
++
++        for item in candidates:
++            key = os.path.normcase(str(item))
++            if key in seen:
++                raise InvalidExportError(
++                    f"duplicate audiobook input: {item}",
++                    code="audioexport.audiobook_duplicate_input",
++                )
++            seen.add(key)
++            resolved.append(item)
++    return tuple(resolved)
++
++
++def source_title(probe_payload: Mapping[str, Any]) -> str | None:
++    """Return the first source audio title tag, falling back to format tags."""
++    streams = probe_payload.get("streams", ())
++    if isinstance(streams, Sequence) and not isinstance(streams, (str, bytes)):
++        for stream in streams:
++            if isinstance(stream, Mapping) and stream.get("codec_type") == "audio":
++                tags = stream.get("tags", {})
++                if isinstance(tags, Mapping):
++                    title = next(
++                        (value for key, value in tags.items() if str(key).casefold() == "title"),
++                        None,
++                    )
++                    if isinstance(title, str) and title.strip():
++                        return title.strip()
++                break
++    container = probe_payload.get("format", {})
++    tags = container.get("tags", {}) if isinstance(container, Mapping) else {}
++    if isinstance(tags, Mapping):
++        title = next((value for key, value in tags.items() if str(key).casefold() == "title"), None)
++        if isinstance(title, str) and title.strip():
++            return title.strip()
++    return None
+diff --git a/audioexport/metadata.py b/audioexport/metadata.py
+new file mode 100644
+index 0000000..3305127
+--- /dev/null
++++ b/audioexport/metadata.py
+@@ -0,0 +1,108 @@
++"""Typed audiobook metadata and FFmpeg-compatible tag policy."""
++
++from __future__ import annotations
++
++import re
++from collections.abc import Mapping
++from dataclasses import dataclass, field, fields
++from typing import Any
++
++from .errors import InvalidExportError
++
++_CANONICAL_TO_FFMPEG = {
++    "title": "title",
++    "author": "artist",
++    "album": "album",
++    "album_artist": "album_artist",
++    "writer": "composer",
++    "genre": "genre",
++    "description": "description",
++    "long_description": "synopsis",
++    "comment": "comment",
++    "copyright": "copyright",
++    "encoded_by": "encoded_by",
++    "language": "language",
++    "publisher": "publisher",
++    "grouping": "grouping",
++}
++
++
++@dataclass(frozen=True, slots=True)
++class AudiobookMetadata:
++    title: str | None = None
++    author: str | None = None
++    album: str | None = None
++    album_artist: str | None = None
++    writer: str | None = None
++    genre: str | None = None
++    description: str | None = None
++    long_description: str | None = None
++    comment: str | None = None
++    copyright: str | None = None
++    encoded_by: str | None = None
++    language: str | None = None
++    publisher: str | None = None
++    grouping: str | None = None
++    extra: Mapping[str, str] = field(default_factory=dict)
++
++    def __post_init__(self) -> None:
++        for item in fields(self):
++            value = getattr(self, item.name)
++            if item.name == "extra":
++                if not isinstance(value, Mapping):
++                    raise InvalidExportError(
++                        "extra audiobook metadata must be a mapping",
++                        code="audioexport.audiobook_metadata_invalid",
++                    )
++            elif value is not None and not isinstance(value, str):
++                raise InvalidExportError(
++                    f"audiobook metadata {item.name} must be a string",
++                    code="audioexport.audiobook_metadata_invalid",
++                )
++
++
++def _put_tag(tags: dict[str, str], key: Any, value: Any) -> None:
++    if (
++        not isinstance(key, str)
++        or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key)
++        or not isinstance(value, str)
++    ):
++        raise InvalidExportError(
++            "audiobook metadata must contain string values and simple keys",
++            code="audioexport.audiobook_metadata_invalid",
++        )
++    tags[key.lower()] = value
++
++
++def audiobook_tags(metadata: AudiobookMetadata | Mapping[str, str] | None) -> dict[str, str]:
++    """Map canonical metadata to FFmpeg tags and inject the audiobook media kind.
++
++    Mapping inputs accept canonical field names as well as additional FFmpeg
++    tag names. ``extra`` on AudiobookMetadata is applied last, allowing an
++    explicit expert override such as ``media_type``.
++    """
++    tags = {"media_type": "2"}
++    if metadata is None:
++        return tags
++    if isinstance(metadata, AudiobookMetadata):
++        values = {
++            item.name: getattr(metadata, item.name)
++            for item in fields(metadata)
++            if item.name != "extra" and getattr(metadata, item.name) is not None
++        }
++        extras = metadata.extra
++    elif isinstance(metadata, Mapping):
++        values = dict(metadata)
++        extras = {}
++    else:
++        raise InvalidExportError(
++            "metadata must be AudiobookMetadata or a string mapping",
++            code="audioexport.audiobook_metadata_invalid",
++        )
++
++    for key, value in values.items():
++        normalized_key = key.lower() if isinstance(key, str) else key
++        _put_tag(tags, _CANONICAL_TO_FFMPEG.get(normalized_key, normalized_key), value)
++    for key, value in extras.items():
++        _put_tag(tags, key, value)
++    return dict(sorted(tags.items()))
+diff --git a/tests/test_api_import.py b/tests/test_api_import.py
+index dcfa7de..fb0ad6c 100644
+--- a/tests/test_api_import.py
++++ b/tests/test_api_import.py
+@@ -1,6 +1,10 @@
+-from audioexport import encode
++from audioexport import AudiobookMetadata, AudiobookTrack, build_audiobook, encode
++from audioexport.api import build_audiobook as api_build_audiobook
+ from audioexport.api import encode as api_encode
+
+
+ def test_flat_public_api() -> None:
+     assert encode is api_encode
++    assert build_audiobook is api_build_audiobook
++    assert AudiobookTrack.__name__ == "AudiobookTrack"
++    assert AudiobookMetadata.__name__ == "AudiobookMetadata"
+diff --git a/tests/test_audiobook_atomicity.py b/tests/test_audiobook_atomicity.py
+new file mode 100644
+index 0000000..ccfa415
+--- /dev/null
++++ b/tests/test_audiobook_atomicity.py
+@@ -0,0 +1,165 @@
++from __future__ import annotations
++
++import os
++import threading
++from concurrent.futures import ThreadPoolExecutor
++from pathlib import Path
++from typing import Any
++
++import pytest
++
++from audioexport import EncodingError, InvalidExportError, audiobook, pipeline
++from audioexport.audiobook import build_audiobook
++
++
++def _temporary_artifacts(folder: Path) -> list[Path]:
++    return [
++        path
++        for path in folder.iterdir()
++        if path.name.endswith((".tmp", ".backup"))
++        or (path.name.startswith(".") and path.suffix == ".m4b")
++    ]
++
++
++def test_segment_failure_preserves_last_good_pair_and_cleans_workdir(
++    wav: Path, tmp_path: Path, have_tools: None, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    output = tmp_path / "safe.m4b"
++    original = build_audiobook([wav], output, bitrate="96k")
++    audio_bytes = output.read_bytes()
++    manifest_bytes = original.manifest_path.read_bytes()
++
++    def fail_segment(*args: Any, **kwargs: Any) -> int:
++        raise EncodingError("injected segment failure", code="audioexport.audiobook_segment_failed")
++
++    monkeypatch.setattr(audiobook, "_normalize_segment", fail_segment)
++    with pytest.raises(EncodingError) as error:
++        build_audiobook([wav], output, bitrate="128k")
++
++    assert error.value.code == "audioexport.audiobook_segment_failed"
++    assert output.read_bytes() == audio_bytes
++    assert original.manifest_path.read_bytes() == manifest_bytes
++    assert not list(tmp_path.glob(".safe.audioexport-*"))
++    assert not [path for path in _temporary_artifacts(tmp_path) if path.name.startswith(".safe.")]
++
++
++def test_concat_failure_preserves_last_good_pair(
++    wav: Path, tmp_path: Path, have_tools: None, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    output = tmp_path / "concat-safe.m4b"
++    original = build_audiobook([wav], output, bitrate="96k")
++    audio_bytes = output.read_bytes()
++    manifest_bytes = original.manifest_path.read_bytes()
++
++    def fail_concat(*args: Any, **kwargs: Any) -> int:
++        raise EncodingError("injected concat failure", code="audioexport.audiobook_concat_failed")
++
++    monkeypatch.setattr(audiobook, "_concat_segments", fail_concat)
++    with pytest.raises(EncodingError) as error:
++        build_audiobook([wav], output, bitrate="128k")
++
++    assert error.value.code == "audioexport.audiobook_concat_failed"
++    assert output.read_bytes() == audio_bytes
++    assert original.manifest_path.read_bytes() == manifest_bytes
++    assert not list(tmp_path.glob(".concat-safe.audioexport-*"))
++
++
++def test_final_mux_failure_preserves_last_good_pair(
++    wav: Path, tmp_path: Path, have_tools: None, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    output = tmp_path / "mux-safe.m4b"
++    original = build_audiobook([wav], output, bitrate="96k")
++    audio_bytes = output.read_bytes()
++    manifest_bytes = original.manifest_path.read_bytes()
++    real_run = audiobook.run
++
++    def fail_final_mux(args: list[str], **kwargs: Any) -> Any:
++        if str(args[-1]).endswith(".m4b"):
++            raise EncodingError("injected mux failure", code="audioexport.tool_failed")
++        return real_run(args, **kwargs)
++
++    monkeypatch.setattr(audiobook, "run", fail_final_mux)
++    with pytest.raises(EncodingError) as error:
++        build_audiobook([wav], output, bitrate="128k")
++
++    assert error.value.code == "audioexport.audiobook_mux_failed"
++    assert output.read_bytes() == audio_bytes
++    assert original.manifest_path.read_bytes() == manifest_bytes
++    assert _temporary_artifacts(tmp_path) == []
++
++
++def test_manifest_commit_failure_restores_last_good_audiobook_pair(
++    wav: Path, tmp_path: Path, have_tools: None, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    output = tmp_path / "rollback.m4b"
++    original = build_audiobook([wav], output, bitrate="96k")
++    audio_bytes = output.read_bytes()
++    manifest_bytes = original.manifest_path.read_bytes()
++    real_replace = os.replace
++
++    def fail_manifest_commit(
++        source: str | os.PathLike[str], destination: str | os.PathLike[str]
++    ) -> None:
++        if Path(destination) == original.manifest_path and Path(source).suffix == ".tmp":
++            raise OSError("injected manifest commit failure")
++        real_replace(source, destination)
++
++    monkeypatch.setattr(os, "replace", fail_manifest_commit)
++    with pytest.raises(EncodingError) as error:
++        build_audiobook([wav], output, bitrate="128k")
++
++    assert error.value.code == "audioexport.manifest_commit_failed"
++    assert output.read_bytes() == audio_bytes
++    assert original.manifest_path.read_bytes() == manifest_bytes
++    assert _temporary_artifacts(tmp_path) == []
++
++
++def test_output_and_manifest_symlinks_are_refused(
++    wav: Path, tmp_path: Path, have_tools: None
++) -> None:
++    target = tmp_path / "user-data.bin"
++    target.write_bytes(b"keep")
++    output = tmp_path / "output.m4b"
++    try:
++        output.symlink_to(target)
++    except (OSError, NotImplementedError) as exc:
++        pytest.skip(f"symlinks unavailable: {exc}")
++
++    with pytest.raises(InvalidExportError, match="symlink output"):
++        build_audiobook([wav], output, force=True)
++    assert output.is_symlink()
++    assert target.read_bytes() == b"keep"
++
++    output.unlink()
++    sidecar = output.with_name(output.name + ".audioexport.json")
++    sidecar.symlink_to(target)
++    with pytest.raises(InvalidExportError, match="sidecar"):
++        build_audiobook([wav], output)
++    assert sidecar.is_symlink()
++    assert target.read_bytes() == b"keep"
++
++
++def test_same_target_concurrent_writers_are_rejected(
++    wav: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    started = threading.Event()
++    release = threading.Event()
++
++    def blocked_build(*args: Any, **kwargs: Any) -> str:
++        started.set()
++        if not release.wait(timeout=5):
++            raise TimeoutError("test did not release the first audiobook writer")
++        return "first writer finished"
++
++    monkeypatch.setattr(audiobook, "_build_unlocked", blocked_build)
++    output = tmp_path / "contended.m4b"
++    with ThreadPoolExecutor(max_workers=1) as pool:
++        first = pool.submit(build_audiobook, [wav], output)
++        assert started.wait(timeout=5)
++        with pytest.raises(EncodingError) as error:
++            build_audiobook([wav], output)
++        assert error.value.code == "audioexport.output_busy"
++        release.set()
++        assert first.result(timeout=5) == "first writer finished"
++
++    assert not pipeline._output_lock_path(output).exists()
+diff --git a/tests/test_audiobook_cache.py b/tests/test_audiobook_cache.py
+new file mode 100644
+index 0000000..c8a963a
+--- /dev/null
++++ b/tests/test_audiobook_cache.py
+@@ -0,0 +1,95 @@
++from __future__ import annotations
++
++import subprocess
++from pathlib import Path
++
++from audioexport.audiobook import build_audiobook
++
++
++def _write_cover(path: Path, color: str) -> None:
++    subprocess.run(
++        [
++            "ffmpeg",
++            "-hide_banner",
++            "-loglevel",
++            "error",
++            "-y",
++            "-f",
++            "lavfi",
++            "-i",
++            f"color=c={color}:s=32x32:d=0.1",
++            "-frames:v",
++            "1",
++            str(path),
++        ],
++        check=True,
++        capture_output=True,
++        text=True,
++    )
++
++
++def test_cache_identity_tracks_source_options_metadata_cover_and_chapters(
++    wav: Path, tmp_path: Path, have_tools: None
++) -> None:
++    source = tmp_path / "source.wav"
++    source.write_bytes(wav.read_bytes())
++    output = tmp_path / "book.m4b"
++
++    baseline = build_audiobook([source], output, bitrate="96k", metadata={"title": "First"})
++    assert build_audiobook([source], output, bitrate="96k", metadata={"title": "First"}).reused
++    (tmp_path / "irrelevant.txt").write_text("not an input", encoding="utf-8")
++    assert build_audiobook([source], output, bitrate="96k", metadata={"title": "First"}).reused
++
++    bitrate_changed = build_audiobook([source], output, bitrate="128k", metadata={"title": "First"})
++    assert not bitrate_changed.reused and bitrate_changed.export_id != baseline.export_id
++    metadata_changed = build_audiobook(
++        [source], output, bitrate="128k", metadata={"title": "Second"}
++    )
++    assert not metadata_changed.reused and metadata_changed.export_id != bitrate_changed.export_id
++
++    cover = tmp_path / "cover.jpg"
++    _write_cover(cover, "red")
++    cover_added = build_audiobook(
++        [source], output, bitrate="128k", metadata={"title": "Second"}, cover=cover
++    )
++    assert not cover_added.reused
++    _write_cover(cover, "blue")
++    cover_changed = build_audiobook(
++        [source], output, bitrate="128k", metadata={"title": "Second"}, cover=cover
++    )
++    assert not cover_changed.reused and cover_changed.export_id != cover_added.export_id
++
++    chapters_file = tmp_path / "chapters.txt"
++    chapters_file.write_text("00:00:00.000 First chapter\n", encoding="utf-8")
++    chapters_added = build_audiobook(
++        [source],
++        output,
++        bitrate="128k",
++        metadata={"title": "Second"},
++        cover=cover,
++        chapters_file=chapters_file,
++    )
++    assert not chapters_added.reused
++    chapters_file.write_text("00:00:00.000 Updated chapter\n", encoding="utf-8")
++    chapters_changed = build_audiobook(
++        [source],
++        output,
++        bitrate="128k",
++        metadata={"title": "Second"},
++        cover=cover,
++        chapters_file=chapters_file,
++    )
++    assert not chapters_changed.reused and chapters_changed.export_id != chapters_added.export_id
++
++    content = bytearray(source.read_bytes())
++    content[-1] ^= 1
++    source.write_bytes(content)
++    source_changed = build_audiobook(
++        [source],
++        output,
++        bitrate="128k",
++        metadata={"title": "Second"},
++        cover=cover,
++        chapters_file=chapters_file,
++    )
++    assert not source_changed.reused and source_changed.export_id != chapters_changed.export_id
+diff --git a/tests/test_audiobook_inputs.py b/tests/test_audiobook_inputs.py
+new file mode 100644
+index 0000000..63e83ad
+--- /dev/null
++++ b/tests/test_audiobook_inputs.py
+@@ -0,0 +1,70 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++
++from audioexport.errors import InvalidExportError
++from audioexport.inputs import discover_audio_inputs, natural_sort_key, source_title
++
++
++def test_directory_inputs_are_naturally_sorted_and_sidecars_ignored(tmp_path: Path) -> None:
++    for name in ("10.mp3", "2.mp3", "1.mp3", "chapters.txt", "cover.jpg", "notes.txt"):
++        (tmp_path / name).write_bytes(b"data")
++
++    assert [path.name for path in discover_audio_inputs(tmp_path)] == ["1.mp3", "2.mp3", "10.mp3"]
++
++
++def test_multiple_inputs_preserve_order_and_reject_resolved_duplicates(tmp_path: Path) -> None:
++    first = tmp_path / "first track.wav"
++    second = tmp_path / "第二.mp3"
++    first.touch()
++    second.touch()
++
++    assert discover_audio_inputs([second, first]) == (second.resolve(), first.resolve())
++    with pytest.raises(InvalidExportError) as error:
++        discover_audio_inputs([first, first.resolve()])
++    assert error.value.code == "audioexport.audiobook_duplicate_input"
++
++
++def test_empty_directory_and_unsupported_explicit_input_are_rejected(tmp_path: Path) -> None:
++    with pytest.raises(InvalidExportError, match="contains no supported"):
++        discover_audio_inputs(tmp_path)
++
++    sidecar = tmp_path / "chapters.txt"
++    sidecar.touch()
++    with pytest.raises(InvalidExportError) as error:
++        discover_audio_inputs(sidecar)
++    assert error.value.code == "audioexport.audiobook_input_invalid"
++
++
++def test_missing_and_empty_input_list_are_rejected(tmp_path: Path) -> None:
++    with pytest.raises(InvalidExportError) as error:
++        discover_audio_inputs([])
++    assert error.value.code == "audioexport.audiobook_no_inputs"
++
++    with pytest.raises(InvalidExportError):
++        discover_audio_inputs(tmp_path / "missing.wav")
++
++
++def test_natural_key_is_deterministic() -> None:
++    names = ["chapter 10.mp3", "chapter 2.mp3", "Chapter 1.mp3"]
++    assert sorted(names, key=natural_sort_key) == [
++        "Chapter 1.mp3",
++        "chapter 2.mp3",
++        "chapter 10.mp3",
++    ]
++
++
++def test_source_title_prefers_audio_tag_then_format_tag() -> None:
++    assert (
++        source_title(
++            {
++                "streams": [{"codec_type": "audio", "tags": {"TITLE": "  Track title "}}],
++                "format": {"tags": {"title": "Container title"}},
++            }
++        )
++        == "Track title"
++    )
++    assert source_title({"streams": [], "format": {"tags": {"title": "Fallback"}}}) == "Fallback"
++    assert source_title({"streams": [], "format": {}}) is None
+diff --git a/tests/test_audiobook_metadata.py b/tests/test_audiobook_metadata.py
+new file mode 100644
+index 0000000..4051512
+--- /dev/null
++++ b/tests/test_audiobook_metadata.py
+@@ -0,0 +1,64 @@
++from __future__ import annotations
++
++import pytest
++
++from audioexport.errors import InvalidExportError
++from audioexport.metadata import AudiobookMetadata, audiobook_tags
++
++
++def test_canonical_audiobook_fields_map_to_ffmpeg_tags() -> None:
++    tags = audiobook_tags(
++        AudiobookMetadata(
++            title="The Book",
++            author="A. Author",
++            album_artist="The Publisher",
++            writer="W. Writer",
++            long_description="Long text",
++        )
++    )
++    assert tags["media_type"] == "2"
++    assert tags["title"] == "The Book"
++    assert tags["artist"] == "A. Author"
++    assert tags["album_artist"] == "The Publisher"
++    assert tags["composer"] == "W. Writer"
++    assert tags["synopsis"] == "Long text"
++
++
++def test_extra_metadata_applies_after_default_and_canonical_mapping() -> None:
++    tags = audiobook_tags(
++        AudiobookMetadata(
++            author="Author", extra={"artist": "Override", "media_type": "1", "custom": "v"}
++        )
++    )
++    assert tags["artist"] == "Override"
++    assert tags["media_type"] == "1"
++    assert tags["custom"] == "v"
++
++
++def test_mapping_accepts_canonical_and_extra_tags() -> None:
++    assert audiobook_tags({"author": "Author", "title": "Title", "publisher": "Press"}) == {
++        "artist": "Author",
++        "media_type": "2",
++        "publisher": "Press",
++        "title": "Title",
++    }
++
++
++@pytest.mark.parametrize(
++    "metadata",
++    [
++        {"bad-key": "value"},
++        {"title": 4},
++        {"title": None},
++        {"media_type": ["2"]},
++    ],
++)
++def test_invalid_metadata_is_rejected(metadata: object) -> None:
++    with pytest.raises(InvalidExportError) as error:
++        audiobook_tags(metadata)  # type: ignore[arg-type]
++    assert error.value.code == "audioexport.audiobook_metadata_invalid"
++
++
++def test_typed_model_rejects_non_string_values() -> None:
++    with pytest.raises(InvalidExportError):
++        AudiobookMetadata(author=12)  # type: ignore[arg-type]
+diff --git a/tests/test_audiobook_profile.py b/tests/test_audiobook_profile.py
+new file mode 100644
+index 0000000..c2e5360
+--- /dev/null
++++ b/tests/test_audiobook_profile.py
+@@ -0,0 +1,119 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++
++from audioexport.audiobook_profile import load_audiobook_profile, resolve_profile_overrides
++from audioexport.errors import InvalidExportError
++
++
++def _base_profile() -> str:
++    return (
++        'schema = "audioexport.audiobook.v1"\n'
++        'output = "My Book.m4b"\n'
++        'inputs = ["10.mp3", "02 chapter.flac"]\n'
++        '[audio]\nbitrate = "96k"\nsample_rate = 44100\nchannels = 2\n'
++        '[metadata]\ntitle = "Book"\nauthor = "Author"\n'
++        '[metadata.extra]\ngrouping = "Series"\n'
++        '[chapters]\nmode = "tracks"\ntitle_source = "tag"\n'
++    )
++
++
++def test_profile_resolves_ordered_resources_relative_to_toml(tmp_path: Path) -> None:
++    for name in ("10.mp3", "02 chapter.flac", "cover.jpg", "chapters.txt"):
++        (tmp_path / name).write_text("resource", encoding="utf-8")
++    profile_path = tmp_path / "audiobook.toml"
++    profile_path.write_text(
++        _base_profile()
++        .replace("[audio]", 'cover = "cover.jpg"\nchapters_file = "chapters.txt"\n[audio]')
++        .replace('mode = "tracks"', 'mode = "explicit"'),
++        encoding="utf-8",
++    )
++
++    profile = load_audiobook_profile(profile_path)
++    assert profile.output == (tmp_path / "My Book.m4b").resolve()
++    assert [path.name for path in profile.inputs] == ["10.mp3", "02 chapter.flac"]
++    assert profile.cover == (tmp_path / "cover.jpg").resolve()
++    assert profile.chapters_file == (tmp_path / "chapters.txt").resolve()
++    assert profile.audio.bitrate == "96k"
++    assert profile.metadata.author == "Author"
++    assert profile.metadata.extra == {"grouping": "Series"}
++    assert profile.chapter_mode == "explicit"
++
++
++def test_profile_rejects_unknown_fields_missing_resources_and_directories(tmp_path: Path) -> None:
++    (tmp_path / "book.mp3").touch()
++    for name in ("10.mp3", "02 chapter.flac"):
++        (tmp_path / name).touch()
++    profile_path = tmp_path / "bad.toml"
++    profile_path.write_text(_base_profile().replace('"10.mp3"', '"missing.mp3"'), encoding="utf-8")
++    with pytest.raises(InvalidExportError) as error:
++        load_audiobook_profile(profile_path)
++    assert error.value.code == "audioexport.audiobook_profile_invalid"
++
++    profile_path.write_text(
++        _base_profile().replace("[audio]", "unexpected = true\n[audio]"), encoding="utf-8"
++    )
++    with pytest.raises(InvalidExportError, match="unknown audiobook profile fields"):
++        load_audiobook_profile(profile_path)
++
++    (tmp_path / "subdir").mkdir()
++    profile_path.write_text(_base_profile().replace('"10.mp3"', '"subdir"'), encoding="utf-8")
++    with pytest.raises(InvalidExportError, match="existing file"):
++        load_audiobook_profile(profile_path)
++
++
++def test_profile_rejects_globs_traversal_and_unknown_nested_fields(tmp_path: Path) -> None:
++    (tmp_path / "book.mp3").touch()
++    for name in ("10.mp3", "02 chapter.flac"):
++        (tmp_path / name).touch()
++    profile_path = tmp_path / "bad.toml"
++    profile_path.write_text(_base_profile().replace('"10.mp3"', '"*.mp3"'), encoding="utf-8")
++    with pytest.raises(InvalidExportError, match="glob or template"):
++        load_audiobook_profile(profile_path)
++
++    profile_path.write_text(
++        _base_profile().replace('"10.mp3"', '"../outside.mp3"'), encoding="utf-8"
++    )
++    with pytest.raises(InvalidExportError, match="parent directories"):
++        load_audiobook_profile(profile_path)
++
++    profile_path.write_text(
++        _base_profile().replace('title_source = "tag"', 'title_source = "tag"\nextra = true'),
++        encoding="utf-8",
++    )
++    with pytest.raises(InvalidExportError, match="unknown fields"):
++        load_audiobook_profile(profile_path)
++
++
++def test_cli_overrides_take_precedence_without_changing_input_order(tmp_path: Path) -> None:
++    for name in ("10.mp3", "02 chapter.flac", "override.jpg", "override.txt"):
++        (tmp_path / name).touch()
++    profile_path = tmp_path / "audiobook.toml"
++    profile_path.write_text(_base_profile(), encoding="utf-8")
++    profile = load_audiobook_profile(profile_path)
++
++    overridden = resolve_profile_overrides(
++        profile,
++        output=tmp_path / "CLI.m4b",
++        metadata={"title": "CLI title", "author": "CLI author", "custom": "extra"},
++        cover=tmp_path / "override.jpg",
++        chapters_file=tmp_path / "override.txt",
++        bitrate="128k",
++        sample_rate=48000,
++        channels=1,
++        use_filenames_as_chapters=True,
++    )
++    assert overridden.output == (tmp_path / "CLI.m4b").absolute()
++    assert overridden.inputs == profile.inputs
++    assert overridden.metadata.title == "CLI title"
++    assert overridden.metadata.author == "CLI author"
++    assert overridden.metadata.extra == {"grouping": "Series", "custom": "extra"}
++    assert overridden.cover == (tmp_path / "override.jpg").resolve()
++    assert overridden.chapters_file == (tmp_path / "override.txt").resolve()
++    assert overridden.chapter_mode == "explicit"
++    assert overridden.title_source == "filename"
++    assert overridden.audio.bitrate == "128k"
++    assert overridden.audio.sample_rate == 48000
++    assert overridden.audio.channels == 1
+diff --git a/tests/test_audiobook_real.py b/tests/test_audiobook_real.py
+new file mode 100644
+index 0000000..5830794
+--- /dev/null
++++ b/tests/test_audiobook_real.py
+@@ -0,0 +1,95 @@
++from __future__ import annotations
++
++import subprocess
++from pathlib import Path
++
++from audioexport.audiobook import AudiobookTrack, build_audiobook
++from audioexport.fftools import probe
++
++
++def _make_audio(
++    path: Path, *, sample_rate: int, channels: int, codec: str, title: str | None = None
++) -> None:
++    command = [
++        "ffmpeg",
++        "-hide_banner",
++        "-loglevel",
++        "error",
++        "-f",
++        "lavfi",
++        "-i",
++        f"sine=frequency=440:sample_rate={sample_rate}",
++        "-t",
++        "0.8",
++        "-ac",
++        str(channels),
++        "-c:a",
++        codec,
++    ]
++    if title is not None:
++        command.extend(["-metadata", f"title={title}"])
++    command.append(str(path))
++    subprocess.run(command, check=True, capture_output=True, text=True)
++
++
++def test_mixed_tracks_build_aac_audiobook_and_cache_respects_order(
++    tmp_path: Path, have_tools: None
++) -> None:
++    first = tmp_path / "01-tagged.wav"
++    second = tmp_path / "10 fallback.flac"
++    _make_audio(first, sample_rate=22050, channels=1, codec="pcm_s16le", title="Tagged intro")
++    _make_audio(second, sample_rate=44100, channels=2, codec="flac")
++    output = tmp_path / "book.m4b"
++
++    result = build_audiobook(
++        [AudiobookTrack(second, title="Explicit second"), first],
++        output,
++        metadata={"title": "The Book", "author": "A. Author"},
++    )
++    info = probe(output)
++    audio = [stream for stream in info["streams"] if stream.get("codec_type") == "audio"]
++    assert len(audio) == 1
++    assert audio[0]["codec_name"] == "aac"
++    assert audio[0]["sample_rate"] == "44100"
++    assert audio[0]["channels"] == 2
++    assert result.track_count == 2
++    assert result.chapter_count == 2
++    assert [chapter["tags"]["title"] for chapter in info["chapters"]] == [
++        "Explicit second",
++        "Tagged intro",
++    ]
++    tags = {key.lower(): value for key, value in info["format"].get("tags", {}).items()}
++    assert tags["title"] == "The Book"
++    assert tags["artist"] == "A. Author"
++    assert tags["media_type"] == "2"
++
++    reused = build_audiobook(
++        [AudiobookTrack(second, title="Explicit second"), first],
++        output,
++        metadata={"title": "The Book", "author": "A. Author"},
++    )
++    assert reused.reused
++    assert reused.export_id == result.export_id
++
++    reordered = build_audiobook(
++        [first, AudiobookTrack(second, title="Explicit second")],
++        output,
++        metadata={"title": "The Book", "author": "A. Author"},
++    )
++    assert not reordered.reused
++    assert reordered.export_id != result.export_id
++    assert [chapter["tags"]["title"] for chapter in probe(output)["chapters"]] == [
++        "Tagged intro",
++        "Explicit second",
++    ]
++
++
++def test_explicit_chapters_file_overrides_automatic_track_chapters(
++    tmp_path: Path, wav: Path, have_tools: None
++) -> None:
++    chapters_file = tmp_path / "chapters.txt"
++    chapters_file.write_text("00:00:00.000 Entire work\n", encoding="utf-8")
++
++    result = build_audiobook([wav], tmp_path / "explicit.m4b", chapters_file=chapters_file)
++    assert result.chapter_count == 1
++    assert probe(result.path)["chapters"][0]["tags"]["title"] == "Entire work"
+diff --git a/tests/test_audiobook_scale.py b/tests/test_audiobook_scale.py
+new file mode 100644
+index 0000000..02d93ed
+--- /dev/null
++++ b/tests/test_audiobook_scale.py
+@@ -0,0 +1,31 @@
++from __future__ import annotations
++
++import shutil
++import struct
++import wave
++from pathlib import Path
++
++from audioexport.audiobook import build_audiobook
++from audioexport.fftools import probe
++
++
++def test_one_hundred_tracks_have_natural_order_and_chapters(
++    tmp_path: Path, have_tools: None
++) -> None:
++    tracks = tmp_path / "tracks"
++    tracks.mkdir()
++    source = tmp_path / "short.wav"
++    with wave.open(str(source), "wb") as stream:
++        stream.setnchannels(1)
++        stream.setsampwidth(2)
++        stream.setframerate(22050)
++        stream.writeframes(struct.pack("<h", 0) * 2205)
++    for index in range(1, 101):
++        shutil.copyfile(source, tracks / f"chapter {index}.wav")
++
++    result = build_audiobook(tracks, tmp_path / "hundred.m4b", bitrate="32k")
++    info = probe(result.path)
++    titles = [chapter["tags"]["title"] for chapter in info["chapters"]]
++    assert result.track_count == 100
++    assert result.chapter_count == 100
++    assert titles == [f"chapter {index}" for index in range(1, 101)]
+diff --git a/tests/test_chapters_txt.py b/tests/test_chapters_txt.py
+new file mode 100644
+index 0000000..4ad9e69
+--- /dev/null
++++ b/tests/test_chapters_txt.py
+@@ -0,0 +1,50 @@
++from __future__ import annotations
++
++from pathlib import Path
++
++import pytest
++
++from audioexport.chapters import build_track_chapters, load_chapters_txt
++from audioexport.errors import InvalidExportError
++
++
++def test_chapters_txt_parses_times_comments_and_unicode(tmp_path: Path) -> None:
++    path = tmp_path / "chapters.txt"
++    path.write_text(
++        "# table of contents\n\n00:00:00.000 Intro\n00:00:02.125 Deuxième 章\n",
++        encoding="utf-8",
++    )
++
++    # Explicit chapters have open ends; final duration supplies the last end.
++    chapters = load_chapters_txt(path)
++    assert [(chapter.title, chapter.start_ms, chapter.end_ms) for chapter in chapters] == [
++        ("Intro", 0, None),
++        ("Deuxième 章", 2125, None),
++    ]
++
++
++def test_chapters_txt_rejects_non_monotonic_and_malformed_times(tmp_path: Path) -> None:
++    path = tmp_path / "chapters.txt"
++    path.write_text("00:00:02.000 Later\n00:00:01.000 Earlier\n", encoding="utf-8")
++    with pytest.raises(InvalidExportError) as error:
++        load_chapters_txt(path)
++    assert error.value.code == "audioexport.chapters_invalid"
++
++    path.write_text("00:00:60.000 Invalid\n", encoding="utf-8")
++    with pytest.raises(InvalidExportError):
++        load_chapters_txt(path)
++
++
++def test_track_chapters_use_cumulative_durations() -> None:
++    chapters = build_track_chapters((("One", 1000), ("Two", 2500)))
++    assert [(chapter.title, chapter.start_ms, chapter.end_ms) for chapter in chapters] == [
++        ("One", 0, None),
++        ("Two", 1000, None),
++    ]
++
++
++def test_track_chapters_reject_invalid_rows() -> None:
++    with pytest.raises(InvalidExportError):
++        build_track_chapters((("", 1000),))
++    with pytest.raises(InvalidExportError):
++        build_track_chapters((("Empty", 0),))
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index ee1b5d2..91fa246 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -2,6 +2,7 @@ from __future__ import annotations
+
+ import json
+ import os
++import shutil
+ import subprocess
+ import sys
+ from pathlib import Path
+@@ -63,3 +64,112 @@ def test_doctor(have_tools: None) -> None:
+     parsed = json.loads(result.stdout)
+     assert parsed["ready"]
+     assert parsed["formats"]["mp3"]["encoder"] == "libmp3lame"
++
++
++def test_cli_audiobook_auto_discovers_directory_sidecars(
++    wav: Path, tmp_path: Path, have_tools: None
++) -> None:
++    tracks = tmp_path / "tracks"
++    tracks.mkdir()
++    shutil.copy2(wav, tracks / "01.wav")
++    (tracks / "chapters.txt").write_text("00:00:00.000 Sidecar chapter\n", encoding="utf-8")
++    cover = subprocess.run(
++        [
++            "ffmpeg",
++            "-hide_banner",
++            "-loglevel",
++            "error",
++            "-y",
++            "-f",
++            "lavfi",
++            "-i",
++            "color=c=red:s=64x64:d=0.1",
++            "-frames:v",
++            "1",
++            str(tracks / "cover.jpg"),
++        ],
++        capture_output=True,
++        text=True,
++        check=False,
++    )
++    assert cover.returncode == 0, cover.stderr
++    (tracks / "cover.jpeg").write_bytes(b"lower precedence")
++    (tracks / "cover.png").write_bytes(b"lower precedence")
++
++    output = tmp_path / "cli-book.m4b"
++    completed = _run(
++        "audiobook",
++        str(tracks),
++        "-o",
++        str(output),
++        "--title",
++        "CLI Book",
++        "--author",
++        "CLI Author",
++        "--json",
++    )
++    assert completed.returncode == 0, completed.stderr
++    result = json.loads(completed.stdout)
++    assert set(result["discovered_resources"]) == {"cover.jpg", "chapters.txt"}
++    info = json.loads(_run("inspect", str(output), "--json").stdout)
++    assert info["chapters"][0]["tags"]["title"] == "Sidecar chapter"
++    assert any(
++        stream.get("codec_type") == "video"
++        and stream.get("disposition", {}).get("attached_pic") == 1
++        for stream in info["streams"]
++    )
++    assert set(result["discovered_resources"]).issubset(
++        json.loads(output.with_name(output.name + ".audioexport.json").read_text())["resources"][
++            "auto_discovered"
++        ]
++    )
++
++    no_auto_output = tmp_path / "no-auto.m4b"
++    no_auto = _run(
++        "audiobook",
++        str(tracks),
++        "-o",
++        str(no_auto_output),
++        "--no-auto-sidecars",
++        "--json",
++    )
++    assert no_auto.returncode == 0, no_auto.stderr
++    assert json.loads(no_auto.stdout)["discovered_resources"] == []
++    no_auto_info = json.loads(_run("inspect", str(no_auto_output), "--json").stdout)
++    assert not any(
++        stream.get("disposition", {}).get("attached_pic") == 1 for stream in no_auto_info["streams"]
++    )
++    assert no_auto_info["chapters"][0]["tags"]["title"] == "01"
++
++
++def test_cli_audiobook_profile_overrides_metadata_and_output(
++    wav: Path, tmp_path: Path, have_tools: None
++) -> None:
++    profile = tmp_path / "audiobook.toml"
++    profile.write_text(
++        'schema = "audioexport.audiobook.v1"\n'
++        'output = "profile-book.m4b"\n'
++        'inputs = ["speech.wav"]\n'
++        '[metadata]\ntitle = "Profile title"\nauthor = "Profile author"\n'
++        '[chapters]\nmode = "none"\n',
++        encoding="utf-8",
++    )
++    output = tmp_path / "override.m4b"
++    completed = _run(
++        "audiobook",
++        "--profile",
++        str(profile),
++        "--output",
++        str(output),
++        "--author",
++        "CLI author",
++        "--json",
++    )
++    assert completed.returncode == 0, completed.stderr
++    result = json.loads(completed.stdout)
++    assert result["path"] == str(output)
++    assert result["chapter_count"] == 0
++    info = json.loads(_run("inspect", str(output), "--json").stdout)
++    tags = {key.lower(): value for key, value in info["format"].get("tags", {}).items()}
++    assert tags["title"] == "Profile title"
++    assert tags["artist"] == "CLI author"
+diff --git a/tests/test_probe_and_doctor.py b/tests/test_probe_and_doctor.py
+index c0096ab..cacc729 100644
+--- a/tests/test_probe_and_doctor.py
++++ b/tests/test_probe_and_doctor.py
+@@ -96,7 +96,10 @@ def test_doctor_reports_missing_encoder_and_selected_readiness(
+     assert "libopus" in result["formats"]["opus"]["reason"]
+     assert result["formats"]["mp3"]["available"] is True
+     assert Path(result["tools"]["ffmpeg"]["path"]).name == "ffmpeg"
++    assert result["features"]["m4b_audiobook"]["available"] is True
++    assert result["features"]["m4b_stream_copy"]["available"] is True
+     assert result["package"]["name"] == "audioexport"
++
+     assert result["package"]["version"]

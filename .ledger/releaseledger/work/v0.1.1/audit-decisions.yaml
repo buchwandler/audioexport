@@ -1,0 +1,58 @@
+rows:
+  - sha: 3d51c13bb8342d90bd9477ddcca79818ab88b949
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/api.py
+      - audioexport/audiobook.py
+      - audioexport/audiobook_profile.py
+      - audioexport/chapters.py
+      - audioexport/cli.py
+      - audioexport/fftools.py
+      - audioexport/inputs.py
+      - audioexport/metadata.py
+      - tests/test_audiobook_atomicity.py
+      - tests/test_audiobook_cache.py
+      - tests/test_audiobook_profile.py
+      - tests/test_audiobook_real.py
+      - tests/test_cli.py
+    observed_behavior: "Adds ordered multi-track audiobook assembly that normalizes source tracks to common AAC settings, concatenates them without a second audio encode, writes metadata, cover art, and chapters, verifies the final M4B, and records a reusable audiobook manifest."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 31a1e4e74bd6a1721ecba0b19eb59b401415e40a
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audioexport/api.py
+      - audioexport/pipeline.py
+      - audioexport/preflight.py
+      - audioexport/profile.py
+      - audioexport/validation.py
+      - docs/readio-migration.md
+      - tests/test_preflight.py
+      - tests/test_profile_resolution.py
+      - tests/test_profiles_multiformat.py
+    observed_behavior: "Adds a read-only preflight API that resolves profile outputs, validates metadata, source duration, selected resources, chapters, and only the requested encoders before any export writes; exposes the resolved values through the public API."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 6b0e7a0cabf32195c0080d9bae6122f20c0c252e
+    inspected: true
+    inspected_paths:
+      - docs/conf.py
+      - docs/index.md
+    observed_behavior: "Adds a Sphinx documentation landing page with installation, CLI, profile, audiobook, Python API, artifact-safety, and migration links, and fixes the Sphinx viewcode extension name."
+    public_impact: docs
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: "Ledger metadata changes in this commit are internal documentation-scan state and are not release-note material."
+    stale: false

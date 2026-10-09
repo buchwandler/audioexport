@@ -1,0 +1,1862 @@
+ README.md                          |  38 +++++
+ audioexport/__init__.py            |   6 +-
+ audioexport/api.py                 |   6 +-
+ audioexport/audiobook.py           |   4 +-
+ audioexport/fftools.py             |  27 ++--
+ audioexport/pipeline.py            | 131 +++--------------
+ audioexport/preflight.py           |  77 ++++++++++
+ audioexport/profile.py             | 127 +++++++++++------
+ audioexport/validation.py          |  63 +++++++++
+ docs/Makefile                      |  32 +++++
+ docs/conf.py                       | 101 ++++++++++++++
+ docs/make.bat                      | 113 +++++++++++++++
+ docs/make.py                       |  89 ++++++++++++
+ docs/readio-migration.md           |  48 +++++--
+ docs/requirements.txt              |   5 +
+ scripts/check_package_artifacts.py |  14 +-
+ tests/test_api_import.py           |  38 ++++-
+ tests/test_preflight.py            | 278 +++++++++++++++++++++++++++++++++++++
+ tests/test_probe_and_doctor.py     |  31 +++--
+ tests/test_profile_resolution.py   | 169 ++++++++++++++++++++++
+ tests/test_profiles_multiformat.py |  71 +++++++---
+ 21 files changed, 1245 insertions(+), 223 deletions(-)
+
+diff --git a/README.md b/README.md
+index cd548a4..f8e24ba 100644
+--- a/README.md
++++ b/README.md
+@@ -205,6 +205,44 @@ When a selector is omitted (`None`), configured global artwork is attached autom
+
+ `run_profile()` validates every row, resource, capability, and concrete filename collision before the first encode, then returns results in TOML order. Resource paths are relative to the profile file. Explicit `filename` values are literal simple filenames with the matching extension; no template expansion or nested paths are supported. If omitted, each filename uses the input stem. Profile-wide metadata is inherited by every output; there is no per-output metadata override.
+
++## Profile resolution and read-only preflight API
++
++The `audioexport.profile.v1` `use_cover` and `use_chapters` fields select profile-wide resources for each output. An omitted selector (`None`) uses a configured resource only when the format supports it; `false` suppresses it; `true` requires both a configured resource and a supporting format. Automatic selection is:
++
++| Formats              | Cover by default   | Chapters by default |
++| -------------------- | ------------------ | ------------------- |
++| WAV, FLAC, OGG, Opus | No                 | No                  |
++| MP3                  | Yes, if configured | No                  |
++| M4A, M4B             | Yes, if configured | Yes, if configured  |
++
++`ResolvedOutput` is an immutable description containing normalized format, literal filename, effective normalized bitrate, and selected cover/timeline paths. Explicit filenames are simple filenames with a matching extension and are never interpolated; only an omitted filename uses the supplied source stem. `resolve_output(profile, spec, source_stem)` is a pure operation on an already-loaded profile and does not probe media or read the TOML again.
++
++Use `preflight_profile()` when the complete profile must be proven ready before the first output write. It returns the resolved outputs in TOML order, checks the source, metadata, selected resources and chapters, FFmpeg/FFprobe, and only the requested encoders. It does not accept an output directory and creates no outputs, directories, manifests, or temporary files. An unused global resource (for example, a missing cover on a FLAC-only profile) is not validated.
++
++```python
++from pathlib import Path
++from audioexport import encode, load_profile, preflight_profile
++
++source = Path("master.wav")
++profile = load_profile("export.toml")  # Load once.
++resolved_outputs = preflight_profile(profile, source)
++
++for resolved in resolved_outputs:
++    target = Path("exports") / resolved.filename
++    # A consumer such as Readio performs its target/ownership/overwrite checks here.
++    result = encode(
++        source,
++        target,
++        format=resolved.format,
++        bitrate=resolved.bitrate,
++        metadata=profile.metadata,
++        cover=resolved.cover,
++        timeline=resolved.timeline,
++    )
++```
++
++A consumer may instead call `resolve_output()` for a single selected spec; use full-profile preflight when the operation requires every configured output validated. Preflight is not an ownership authorization: Readio remains responsible for project locks and freshness, destination selection and collision/ownership checks, overwrite authorization, state/index updates, result types, and partial-batch bookkeeping. Call `encode()` only after those consumer-owned checks pass. `ResolvedOutput`, `resolve_output`, and `preflight_profile` are available from both `audioexport` and `audioexport.api`.
++
+ ## Chapters/timeline
+
+ Use an independent JSON file such as [`examples/chapters.json`](examples/chapters.json):
+diff --git a/audioexport/__init__.py b/audioexport/__init__.py
+index 85eda5c..51b48f8 100644
+--- a/audioexport/__init__.py
++++ b/audioexport/__init__.py
+@@ -18,7 +18,8 @@ from .fftools import doctor, probe
+ from .formats import FORMATS, normalize_bitrate
+ from .metadata import AudiobookMetadata
+ from .pipeline import ExportResult, encode, run_profile
+-from .profile import ExportProfile, OutputSpec, load_profile
++from .preflight import preflight_profile
++from .profile import ExportProfile, OutputSpec, ResolvedOutput, load_profile, resolve_output
+
+ try:
+     __version__ = version("audioexport")
+@@ -39,6 +40,7 @@ __all__ = [
+     "ExportResult",
+     "InvalidExportError",
+     "OutputSpec",
++    "ResolvedOutput",
+     "ToolNotFoundError",
+     "VerificationError",
+     "__version__",
+@@ -49,6 +51,8 @@ __all__ = [
+     "load_chapters",
+     "load_profile",
+     "normalize_bitrate",
++    "preflight_profile",
+     "probe",
++    "resolve_output",
+     "run_profile",
+ ]
+diff --git a/audioexport/api.py b/audioexport/api.py
+index 67925df..7158cab 100644
+--- a/audioexport/api.py
++++ b/audioexport/api.py
+@@ -16,7 +16,8 @@ from .fftools import doctor, probe
+ from .formats import FORMATS, normalize_bitrate
+ from .metadata import AudiobookMetadata
+ from .pipeline import ExportResult, encode, run_profile
+-from .profile import ExportProfile, OutputSpec, load_profile
++from .preflight import preflight_profile
++from .profile import ExportProfile, OutputSpec, ResolvedOutput, load_profile, resolve_output
+
+ __all__ = [
+     "FORMATS",
+@@ -32,6 +33,7 @@ __all__ = [
+     "ExportResult",
+     "InvalidExportError",
+     "OutputSpec",
++    "ResolvedOutput",
+     "ToolNotFoundError",
+     "VerificationError",
+     "build_audiobook",
+@@ -41,6 +43,8 @@ __all__ = [
+     "load_chapters",
+     "load_profile",
+     "normalize_bitrate",
++    "preflight_profile",
+     "probe",
++    "resolve_output",
+     "run_profile",
+ ]
+diff --git a/audioexport/audiobook.py b/audioexport/audiobook.py
+index 7617fa3..803c25f 100644
+--- a/audioexport/audiobook.py
++++ b/audioexport/audiobook.py
+@@ -27,14 +27,14 @@ from .metadata import AudiobookMetadata, audiobook_tags
+ from .pipeline import (
+     _canonical_hash,
+     _commit_export,
+-    _cover_kind,
+-    _duration_ms,
+     _manifest_path,
+     _output_lock,
+     _producer_version,
+     _verify_output,
+     sha256_file,
+ )
++from .validation import cover_kind as _cover_kind
++from .validation import duration_ms as _duration_ms
+
+
+ @dataclass(frozen=True, slots=True)
+diff --git a/audioexport/fftools.py b/audioexport/fftools.py
+index bd35aa7..ee24d02 100644
+--- a/audioexport/fftools.py
++++ b/audioexport/fftools.py
+@@ -169,16 +169,20 @@ def probe(path: Path | str, ffprobe: str | Path | None = None) -> dict[str, Any]
+     return _validate_probe_payload(payload)
+
+
++def _parse_encoder_names(text: str) -> frozenset[str]:
++    return frozenset(fields[1] for line in text.splitlines() if len(fields := line.split()) >= 2)
++
++
++def available_encoders(ffmpeg_exe: str | Path) -> frozenset[str]:
++    """Return encoder names reported by one FFmpeg capability query."""
++    result = run([str(ffmpeg_exe), "-hide_banner", "-encoders"])
++    return _parse_encoder_names(result.stdout + "\n" + result.stderr)
++
++
+ def encoder_for_format(fmt: str, ffmpeg: str | Path | None = None) -> str:
+     """Return the preferred available encoder for a format."""
+     normalized = normalize_format(fmt)
+-    exe = executable("ffmpeg", ffmpeg)
+-    result = run([exe, "-hide_banner", "-encoders"])
+-    encoder_names = {
+-        fields[1]
+-        for line in (result.stdout + "\n" + result.stderr).splitlines()
+-        if len(fields := line.split()) >= 2
+-    }
++    encoder_names = available_encoders(executable("ffmpeg", ffmpeg))
+     spec = FORMATS[normalized]
+     selected = next(
+         (
+@@ -218,12 +222,12 @@ def doctor(
+             tools[name] = {"available": False, "error": str(exc)}
+     ff = tools["ffmpeg"]
+     supported: dict[str, Any] = {}
+-    encoder_text = ""
++    encoder_names: frozenset[str] = frozenset()
+     encoder_error: str | None = None
+     if ff["available"]:
+         try:
+             result = run([ff["path"], "-hide_banner", "-encoders"])
+-            encoder_text = result.stdout + "\n" + result.stderr
++            encoder_names = _parse_encoder_names(result.stdout + "\n" + result.stderr)
+         except EncodingError as exc:
+             encoder_error = str(exc)
+     else:
+@@ -232,9 +236,6 @@ def doctor(
+         available: bool | None = None
+         reason: str | None = None
+         if encoder_error is None:
+-            encoder_names = {
+-                fields[1] for line in encoder_text.splitlines() if len(fields := line.split()) >= 2
+-            }
+             selected = next(
+                 (
+                     candidate
+@@ -271,7 +272,7 @@ def doctor(
+     ffprobe_available = tools["ffprobe"]["available"] is True
+     ffmpeg_available = tools["ffmpeg"]["available"] is True
+     aac_available = supported["m4b"]["available"] is True
+-    features = {
++    features: dict[str, dict[str, Any]] = {
+         "m4b_encode": {
+             "available": ffmpeg_available and ffprobe_available and aac_available,
+             "requires": ["ffmpeg", "ffprobe", "aac"],
+diff --git a/audioexport/pipeline.py b/audioexport/pipeline.py
+index 017847b..ecef839 100644
+--- a/audioexport/pipeline.py
++++ b/audioexport/pipeline.py
+@@ -5,9 +5,7 @@ from __future__ import annotations
+ import getpass
+ import hashlib
+ import json
+-import math
+ import os
+-import re
+ import shutil
+ import tempfile
+ from collections.abc import Iterator, Mapping, Sequence
+@@ -20,10 +18,13 @@ from typing import Any
+
+ from .chapters import Chapter, ffmetadata_text, load_chapters, normalize_chapters
+ from .errors import EncodingError, InvalidExportError, VerificationError
+-from .fftools import doctor as fftool_doctor
+ from .fftools import encoder_for_format, executable, probe, run, version
+ from .formats import EXPECTED_CODECS, FORMATS, encoder_options, normalize_bitrate, normalize_format
+-from .profile import ExportProfile, ResolvedOutput, load_profile, resolve_output
++from .preflight import preflight_profile
++from .profile import load_profile
++from .validation import cover_kind as _cover_kind
++from .validation import duration_ms as _duration_ms
++from .validation import validate_metadata as _validate_metadata
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -64,52 +65,6 @@ def _canonical_hash(payload: Mapping[str, Any]) -> str:
+     return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+-def _duration_ms(info: Mapping[str, Any]) -> int:
+-    try:
+-        streams = info["streams"]
+-        stream = next(row for row in streams if row.get("codec_type") == "audio")
+-        raw = stream.get("duration") or info["format"].get("duration")
+-        seconds = float(raw)
+-        if not math.isfinite(seconds) or seconds <= 0:
+-            raise ValueError("non-positive duration")
+-        return round(seconds * 1000)
+-    except (ValueError, TypeError, KeyError, StopIteration) as exc:
+-        raise InvalidExportError(
+-            "source has no valid positive duration", code="audioexport.duration_invalid"
+-        ) from exc
+-
+-
+-def _validate_metadata(metadata: Mapping[str, str] | None) -> dict[str, str]:
+-    result: dict[str, str] = {}
+-    for key, value in (metadata or {}).items():
+-        if (
+-            not isinstance(key, str)
+-            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key)
+-            or not isinstance(value, str)
+-        ):
+-            raise InvalidExportError(
+-                "metadata must be string key/value pairs with simple keys",
+-                code="audioexport.metadata_invalid",
+-            )
+-        result[key.lower()] = value
+-    return dict(sorted(result.items()))
+-
+-
+-def _cover_kind(path: Path) -> str:
+-    try:
+-        with path.open("rb") as stream:
+-            signature = stream.read(8)
+-    except OSError as exc:
+-        raise InvalidExportError(
+-            f"cover not readable: {path}", code="audioexport.cover_invalid"
+-        ) from exc
+-    if signature.startswith(b"\xff\xd8\xff"):
+-        return "mjpeg"
+-    if signature == b"\x89PNG\r\n\x1a\n":
+-        return "png"
+-    raise InvalidExportError("cover must be JPEG or PNG", code="audioexport.cover_invalid")
+-
+-
+ def _manifest_path(output: Path) -> Path:
+     return output.with_name(output.name + ".audioexport.json")
+
+@@ -638,65 +593,6 @@ def encode(
+         )
+
+
+-def _preflight_profile(
+-    profile: ExportProfile,
+-    source: Path | str,
+-    out_dir: Path,
+-    *,
+-    ffprobe: Path | str | None,
+-    ffmpeg: Path | str | None,
+-) -> tuple[tuple[ResolvedOutput, Path], ...]:
+-    """Resolve and validate every profile output before any encoder can write."""
+-    src = Path(source).expanduser().absolute()
+-    if not src.is_file():
+-        raise InvalidExportError(f"source audio missing: {src}", code="audioexport.source_missing")
+-    source_real = src.resolve()
+-    seen_names: set[str] = set()
+-    planned: list[tuple[ResolvedOutput, Path]] = []
+-    checked_timeline: Path | None = None
+-    for spec in profile.outputs:
+-        resolved = resolve_output(profile, spec, src.stem)
+-        key = resolved.filename.casefold()
+-        if key in seen_names:
+-            raise InvalidExportError(
+-                "duplicate profile output filenames", code="audioexport.profile_invalid"
+-            )
+-        seen_names.add(key)
+-        destination = out_dir / resolved.filename
+-        if destination.resolve() == source_real:
+-            raise InvalidExportError(
+-                "input and output must be different files", code="audioexport.same_path"
+-            )
+-        if resolved.cover is not None:
+-            _cover_kind(resolved.cover)
+-        if resolved.timeline is not None and resolved.timeline != checked_timeline:
+-            chapters = load_chapters(resolved.timeline)
+-            source_info = probe(src, ffprobe)
+-            normalize_chapters(chapters, _duration_ms(source_info))
+-            checked_timeline = resolved.timeline
+-        planned.append((resolved, destination))
+-    formats = tuple(spec.format for spec in profile.outputs)
+-    capabilities = fftool_doctor(ffmpeg=ffmpeg, ffprobe=ffprobe, requested_formats=formats)
+-    for name, override in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)):
+-        if not capabilities["tools"][name]["available"]:
+-            executable(name, override)
+-            raise EncodingError(
+-                f"{name} is not ready: {capabilities['tools'][name].get('error', 'unavailable')}",
+-                code="audioexport.tool_failed",
+-            )
+-    if not capabilities["requested_formats_ready"]:
+-        unavailable = [
+-            f"{fmt}: {capabilities['formats'][fmt].get('reason', 'encoder unavailable')}"
+-            for fmt in formats
+-            if capabilities["formats"][fmt]["available"] is not True
+-        ]
+-        raise EncodingError(
+-            "required FFmpeg encoders unavailable: " + "; ".join(unavailable),
+-            code="audioexport.encoder_unavailable",
+-        )
+-    return tuple(planned)
+-
+-
+ def run_profile(
+     source: Path | str,
+     profile: Path | str,
+@@ -709,9 +605,22 @@ def run_profile(
+     """Batch-export an ordinary audio file using a portable TOML export profile."""
+     configuration = load_profile(profile)
+     root = Path(out_dir).expanduser().absolute()
+-    planned = _preflight_profile(configuration, source, root, ffprobe=ffprobe, ffmpeg=ffmpeg)
++    resolved_outputs = preflight_profile(
++        configuration,
++        source,
++        ffmpeg=ffmpeg,
++        ffprobe=ffprobe,
++    )
++    source_real = Path(source).expanduser().absolute().resolve()
++    destinations = tuple(root / item.filename for item in resolved_outputs)
++    for destination in destinations:
++        if destination.resolve() == source_real:
++            raise InvalidExportError(
++                "input and output must be different files", code="audioexport.same_path"
++            )
++
+     outputs = []
+-    for item, destination in planned:
++    for item, destination in zip(resolved_outputs, destinations):
+         result = encode(
+             source,
+             destination,
+diff --git a/audioexport/preflight.py b/audioexport/preflight.py
+new file mode 100644
+index 0000000..b73ebe1
+--- /dev/null
++++ b/audioexport/preflight.py
+@@ -0,0 +1,77 @@
++"""Read-only validation of every output in an already-loaded profile."""
++
++from __future__ import annotations
++
++from pathlib import Path
++
++from .chapters import load_chapters, normalize_chapters
++from .errors import EncodingError, InvalidExportError
++from .fftools import available_encoders, executable, probe
++from .formats import FORMATS
++from .profile import ExportProfile, ResolvedOutput, resolve_output
++from .validation import cover_kind, duration_ms, validate_metadata
++
++
++def preflight_profile(
++    profile: ExportProfile,
++    source: Path | str,
++    *,
++    ffmpeg: Path | str | None = None,
++    ffprobe: Path | str | None = None,
++) -> tuple[ResolvedOutput, ...]:
++    """Resolve and validate a complete profile without creating output artifacts."""
++    if not profile.outputs:
++        raise InvalidExportError(
++            "profile requires at least one output", code="audioexport.profile_invalid"
++        )
++
++    source_path = Path(source).expanduser().absolute()
++    if not source_path.is_file():
++        raise InvalidExportError(
++            f"source audio missing: {source_path}", code="audioexport.source_missing"
++        )
++
++    resolved_outputs: list[ResolvedOutput] = []
++    seen_filenames: set[str] = set()
++    for spec in profile.outputs:
++        resolved = resolve_output(profile, spec, source_path.stem)
++        key = resolved.filename.casefold()
++        if key in seen_filenames:
++            raise InvalidExportError(
++                "duplicate profile output filenames", code="audioexport.profile_invalid"
++            )
++        seen_filenames.add(key)
++        resolved_outputs.append(resolved)
++    validate_metadata(profile.metadata)
++
++    ffmpeg_exe = executable("ffmpeg", ffmpeg)
++    ffprobe_exe = executable("ffprobe", ffprobe)
++    source_info = probe(source_path, ffprobe_exe)
++    source_duration_ms = duration_ms(source_info)
++
++    encoder_names = available_encoders(ffmpeg_exe)
++    requested: dict[tuple[str, ...], list[str]] = {}
++    for resolved in resolved_outputs:
++        candidates = (FORMATS[resolved.format].codec, *FORMATS[resolved.format].fallback_codecs)
++        requested.setdefault(candidates, []).append(resolved.format)
++    for candidates, formats in requested.items():
++        if not any(candidate in encoder_names for candidate in candidates):
++            names = ", ".join(repr(candidate) for candidate in candidates)
++            raise EncodingError(
++                "required FFmpeg encoder unavailable for "
++                f"{', '.join(dict.fromkeys(formats))}: {names}",
++                code="audioexport.encoder_missing",
++            )
++
++    checked_covers: set[Path] = set()
++    checked_timelines: set[Path] = set()
++    for resolved in resolved_outputs:
++        if resolved.cover is not None and resolved.cover not in checked_covers:
++            cover_kind(resolved.cover)
++            checked_covers.add(resolved.cover)
++        if resolved.timeline is not None and resolved.timeline not in checked_timelines:
++            chapters = load_chapters(resolved.timeline)
++            normalize_chapters(chapters, source_duration_ms)
++            checked_timelines.add(resolved.timeline)
++
++    return tuple(resolved_outputs)
+diff --git a/audioexport/profile.py b/audioexport/profile.py
+index 13c92d5..f83ae28 100644
+--- a/audioexport/profile.py
++++ b/audioexport/profile.py
+@@ -43,51 +43,102 @@ class ResolvedOutput:
+     timeline: Path | None
+
+
+-_COVER_FORMATS = frozenset({"mp3", "m4a", "m4b"})
+-_CHAPTER_FORMATS = frozenset({"m4a", "m4b"})
++COVER_FORMATS = frozenset({"mp3", "m4a", "m4b"})
++CHAPTER_FORMATS = frozenset({"m4a", "m4b"})
++
++
++def _validate_filename(filename: object, fmt: str) -> str:
++    if (
++        not isinstance(filename, str)
++        or not filename
++        or filename in {".", ".."}
++        or "\x00" in filename
++        or Path(filename).name != filename
++        or PureWindowsPath(filename).name != filename
++        or Path(filename).suffix.lower() != FORMATS[fmt].extension
++    ):
++        raise InvalidExportError(
++            "output filename must be a simple name with matching extension",
++            code="audioexport.profile_invalid",
++        )
++    return filename
+
+
+ def resolve_output(profile: ExportProfile, spec: OutputSpec, source_stem: str) -> ResolvedOutput:
+-    """Resolve profile-wide resources using per-format defaults and explicit selectors."""
+-    if spec.use_cover is True and profile.cover is None:
++    """Resolve one output's filename, bitrate, and selected profile resources.
++
++    This is a pure operation over an already-loaded profile. It does not check
++    resource contents or touch the filesystem.
++    """
++    if not isinstance(spec, OutputSpec):
++        raise InvalidExportError("output spec is invalid", code="audioexport.profile_invalid")
++    if not isinstance(spec.format, str):
+         raise InvalidExportError(
+-            "use_cover=true requires a profile cover", code="audioexport.profile_invalid"
++            "output format must be a string", code="audioexport.profile_invalid"
+         )
+-    if spec.use_chapters is True and profile.timeline is None:
++    fmt = normalize_format(spec.format)
++    if (
++        not isinstance(source_stem, str)
++        or not source_stem
++        or source_stem in {".", ".."}
++        or "\x00" in source_stem
++        or Path(source_stem).name != source_stem
++        or PureWindowsPath(source_stem).name != source_stem
++    ):
+         raise InvalidExportError(
+-            "use_chapters=true requires a profile timeline", code="audioexport.profile_invalid"
++            "source stem must be a simple non-empty name", code="audioexport.profile_invalid"
+         )
+-    if spec.use_cover is True and spec.format not in _COVER_FORMATS:
++    if spec.filename is None:
++        filename = f"{source_stem}{FORMATS[fmt].extension}"
++    else:
++        filename = _validate_filename(spec.filename, fmt)
++    if spec.bitrate is not None and (
++        isinstance(spec.bitrate, bool) or not isinstance(spec.bitrate, (str, int))
++    ):
+         raise InvalidExportError(
+-            f"cover art is unsupported for {spec.format}", code="audioexport.profile_invalid"
++            "bitrate must be an integer or string", code="audioexport.profile_invalid"
+         )
+-    if spec.use_chapters is True and spec.format not in _CHAPTER_FORMATS:
++    bitrate = normalize_bitrate(spec.bitrate, fmt)
++    for field, value in (("use_cover", spec.use_cover), ("use_chapters", spec.use_chapters)):
++        if value is not None and not isinstance(value, bool):
++            raise InvalidExportError(
++                f"{field} must be a boolean", code="audioexport.profile_invalid"
++            )
++
++    if spec.use_cover is True and fmt not in COVER_FORMATS:
+         raise InvalidExportError(
+-            f"chapters are unsupported for {spec.format}", code="audioexport.profile_invalid"
++            f"cover art is unsupported for {fmt}", code="audioexport.cover_unsupported"
+         )
+-    cover = (
+-        profile.cover
+-        if spec.use_cover is True
+-        or (spec.use_cover is None and profile.cover is not None and spec.format in _COVER_FORMATS)
+-        else None
+-    )
+-    timeline = (
+-        profile.timeline
+-        if spec.use_chapters is True
+-        or (
+-            spec.use_chapters is None
+-            and profile.timeline is not None
+-            and spec.format in _CHAPTER_FORMATS
++    if spec.use_cover is True and profile.cover is None:
++        raise InvalidExportError(
++            "use_cover=true requires a profile cover", code="audioexport.cover_required"
++        )
++    if spec.use_chapters is True and fmt not in CHAPTER_FORMATS:
++        raise InvalidExportError(
++            f"chapters are unsupported for {fmt}", code="audioexport.chapters_unsupported"
+         )
+-        else None
++    if spec.use_chapters is True and profile.timeline is None:
++        raise InvalidExportError(
++            "use_chapters=true requires a profile timeline", code="audioexport.chapters_required"
++        )
++
++    use_cover = spec.use_cover is True or (
++        spec.use_cover is None and profile.cover is not None and fmt in COVER_FORMATS
+     )
+-    return ResolvedOutput(
+-        format=spec.format,
+-        filename=spec.filename or f"{source_stem}{FORMATS[spec.format].extension}",
+-        bitrate=spec.bitrate,
+-        cover=cover,
+-        timeline=timeline,
++    use_chapters = spec.use_chapters is True or (
++        spec.use_chapters is None and profile.timeline is not None and fmt in CHAPTER_FORMATS
+     )
++    cover = profile.cover if use_cover else None
++    timeline = profile.timeline if use_chapters else None
++    if cover is not None and not isinstance(cover, Path):
++        raise InvalidExportError(
++            "profile cover must be a resolved path", code="audioexport.profile_invalid"
++        )
++    if timeline is not None and not isinstance(timeline, Path):
++        raise InvalidExportError(
++            "profile timeline must be a resolved path", code="audioexport.profile_invalid"
++        )
++    return ResolvedOutput(fmt, filename, bitrate, cover, timeline)
+
+
+ def _relative_resource(value: Any, root: Path, field: str) -> Path | None:
+@@ -182,14 +233,6 @@ def load_profile(path: str | Path) -> ExportProfile:
+             raise InvalidExportError(
+                 "use_chapters must be a boolean", code="audioexport.profile_invalid"
+             )
+-        if use_cover is True and raw.get("cover") is None:
+-            raise InvalidExportError(
+-                "use_cover=true requires a profile cover", code="audioexport.profile_invalid"
+-            )
+-        if use_chapters is True and raw.get("timeline") is None:
+-            raise InvalidExportError(
+-                "use_chapters=true requires a profile timeline", code="audioexport.profile_invalid"
+-            )
+         # Validate eagerly. Keep None so default is chosen by encode().
+         if bitrate is not None:
+             normalize_bitrate(bitrate, fmt)
+@@ -204,9 +247,5 @@ def load_profile(path: str | Path) -> ExportProfile:
+         )
+     cover = _relative_resource(raw.get("cover"), path.parent, "cover")
+     timeline = _relative_resource(raw.get("timeline"), path.parent, "timeline")
+-    for field, resource in (("cover", cover), ("timeline", timeline)):
+-        if resource is not None and not resource.is_file():
+-            raise InvalidExportError(
+-                f"{field} must be an existing file", code="audioexport.profile_invalid"
+-            )
++    # Resource existence and content are checked only when a resolved output selects them.
+     return ExportProfile(tuple(specifications), metadata, cover, timeline)
+diff --git a/audioexport/validation.py b/audioexport/validation.py
+new file mode 100644
+index 0000000..41b00f5
+--- /dev/null
++++ b/audioexport/validation.py
+@@ -0,0 +1,63 @@
++"""Shared validation helpers for encoding and profile preflight."""
++
++from __future__ import annotations
++
++import math
++import re
++from collections.abc import Mapping
++from pathlib import Path
++from typing import Any
++
++from .errors import InvalidExportError
++
++
++def duration_ms(info: Mapping[str, Any]) -> int:
++    """Extract a positive audio duration from an FFprobe payload."""
++    try:
++        streams = info["streams"]
++        stream = next(row for row in streams if row.get("codec_type") == "audio")
++        raw = stream.get("duration") or info["format"].get("duration")
++        seconds = float(raw)
++        if not math.isfinite(seconds) or seconds <= 0:
++            raise ValueError("non-positive duration")
++        return round(seconds * 1000)
++    except (ValueError, TypeError, KeyError, StopIteration) as exc:
++        raise InvalidExportError(
++            "source has no valid positive duration", code="audioexport.duration_invalid"
++        ) from exc
++
++
++def validate_metadata(metadata: Mapping[str, str] | None) -> dict[str, str]:
++    if metadata is not None and not isinstance(metadata, Mapping):
++        raise InvalidExportError(
++            "metadata must be string key/value pairs with simple keys",
++            code="audioexport.metadata_invalid",
++        )
++    result: dict[str, str] = {}
++    for key, value in (metadata or {}).items():
++        if (
++            not isinstance(key, str)
++            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key)
++            or not isinstance(value, str)
++        ):
++            raise InvalidExportError(
++                "metadata must be string key/value pairs with simple keys",
++                code="audioexport.metadata_invalid",
++            )
++        result[key.lower()] = value
++    return dict(sorted(result.items()))
++
++
++def cover_kind(path: Path) -> str:
++    try:
++        with path.open("rb") as stream:
++            signature = stream.read(8)
++    except OSError as exc:
++        raise InvalidExportError(
++            f"cover not readable: {path}", code="audioexport.cover_invalid"
++        ) from exc
++    if signature.startswith(b"\xff\xd8\xff"):
++        return "mjpeg"
++    if signature == b"\x89PNG\r\n\x1a\n":
++        return "png"
++    raise InvalidExportError("cover must be JPEG or PNG", code="audioexport.cover_invalid")
+diff --git a/docs/Makefile b/docs/Makefile
+new file mode 100644
+index 0000000..3ff8019
+--- /dev/null
++++ b/docs/Makefile
+@@ -0,0 +1,32 @@
++# Makefile for Sphinx documentation
++
++# You can set these variables from the command line
++SPHINXOPTS    ?=
++SPHINXBUILD   ?= sphinx-build
++SOURCEDIR     = .
++BUILDDIR      = _build
++
++# Put it first so that "make" without argument is like "make help".
++help:
++	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
++
++.PHONY: help Makefile clean html livehtml
++
++# Clean build directory
++clean:
++	rm -rf $(BUILDDIR)/*
++
++# Build HTML documentation
++html:
++	@$(SPHINXBUILD) -M html "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
++	@echo
++	@echo "Build finished. The HTML pages are in $(BUILDDIR)/html."
++
++# Live reload server (requires sphinx-autobuild)
++livehtml:
++	sphinx-autobuild "$(SOURCEDIR)" "$(BUILDDIR)/html" $(SPHINXOPTS) $(O)
++
++# Catch-all target: route all unknown targets to Sphinx using the new
++# "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
++%: Makefile
++	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+diff --git a/docs/conf.py b/docs/conf.py
+new file mode 100644
+index 0000000..cff6f06
+--- /dev/null
++++ b/docs/conf.py
+@@ -0,0 +1,101 @@
++# -- Path setup --------------------------------------------------------------
++
++# If extensions (or modules to document with autodoc) are in another directory,
++# add these directories to sys.path here. If the directory is relative to the
++# documentation root, use os.path.abspath to make it absolute, like shown here.
++#
++import os
++import sys
++
++sys.path.insert(0, os.path.abspath(".."))
++sys.path.insert(0, os.path.abspath("../pykokoro"))
++# -- Project information -----------------------------------------------------
++# https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
++
++project = "audioexport"
++copyright = "2026, Holger Nahrstaedt"
++author = "Holger Nahrstaedt"
++
++# -- General configuration ---------------------------------------------------
++
++# Add any Sphinx extension module names here, as strings. They can be
++# extensions coming with Sphinx (named 'sphinx.ext.*') or your custom
++# ones.
++extensions = [
++    "sphinx.ext.autodoc",
++    "sphinx.ext.doctest",
++    "sphinx.ext.intersphinx",
++    "sphinx.ext.napoleon",
++    "sphinx.ext.piewcode",
++    "myst_parser",
++]
++
++# All authored Sphinx pages are MyST Markdown.
++source_suffix = {
++    ".md": "markdown",
++}
++
++# Required for readable Markdown-native admonitions.
++myst_enable_extensions = ["colon_fence"]
++
++# Current documentation contains headings through H4.
++myst_heading_anchors = 4
++
++# Napoleon settings for NumPy-style docstrings
++napoleon_google_docstring = False
++napoleon_numpy_docstring = True
++napoleon_include_init_with_doc = True
++napoleon_include_private_with_doc = False
++napoleon_include_special_with_doc = True
++napoleon_use_admonition_for_examples = False
++napoleon_use_admonition_for_notes = False
++napoleon_use_admonition_for_references = False
++napoleon_use_ivar = False
++napoleon_use_param = True
++napoleon_use_rtype = True
++napoleon_preprocess_types = False
++napoleon_type_aliases = None
++napoleon_attr_annotations = True
++
++# Autodoc settings
++autodoc_default_options = {
++    "members": True,
++    "undoc-members": True,
++    "show-inheritance": True,
++    "member-order": "bysource",
++}
++
++# Add any paths that contain templates here, relative to this directory.
++templates_path = ["_templates"]
++
++# List of patterns, relative to source directory, that match files and
++# directories to ignore when looking for source files.
++# This pattern also affects html_static_path and html_extra_path.
++exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "README.md"]
++
++
++# -- Options for HTML output -------------------------------------------------
++
++# The theme to use for HTML and HTML Help pages.  See the documentation for
++# a list of builtin themes.
++#
++# html_theme = 'furo'
++
++html_theme = "sphinx_rtd_theme"
++
++html_theme_options = {
++    "navigation_depth": 4,
++    "titles_only": False,
++}
++
++# Add any paths that contain custom static files (such as style sheets) here,
++# relative to this directory. They are copied after the builtin static files,
++# so a file named "default.css" will overwrite the builtin "default.css".
++# html_static_path = ['_static']
++
++# Set up intersphinx maps
++intersphinx_mapping = {
++    "python": ("https://docs.python.org/3", None),
++    "numpy": ("https://numpy.org/doc/stable", None),
++    "PIL": ("https://pillow.readthedocs.io/en/stable", None),
++}
+diff --git a/docs/make.bat b/docs/make.bat
+new file mode 100644
+index 0000000..d6a9242
+--- /dev/null
++++ b/docs/make.bat
+@@ -0,0 +1,113 @@
++@ECHO OFF
++
++REM Command file for Sphinx documentation
++
++set SPHINXBUILD=sphinx-build
++set BUILDDIR=build
++set ALLSPHINXOPTS=-d %BUILDDIR%/doctrees %SPHINXOPTS% .
++if NOT "%PAPER%" == "" (
++	set ALLSPHINXOPTS=-D latex_paper_size=%PAPER% %ALLSPHINXOPTS%
++)
++
++if "%1" == "" goto help
++
++if "%1" == "help" (
++	:help
++	echo.Please use `make ^<target^>` where ^<target^> is one of
++	echo.  html      to make standalone HTML files
++	echo.  dirhtml   to make HTML files named index.html in directories
++	echo.  pickle    to make pickle files
++	echo.  json      to make JSON files
++	echo.  htmlhelp  to make HTML files and a HTML help project
++	echo.  qthelp    to make HTML files and a qthelp project
++	echo.  latex     to make LaTeX files, you can set PAPER=a4 or PAPER=letter
++	echo.  changes   to make an overview over all changed/added/deprecated items
++	echo.  linkcheck to check all external links for integrity
++	echo.  doctest   to run all doctests embedded in the documentation if enabled
++	goto end
++)
++
++if "%1" == "clean" (
++	for /d %%i in (%BUILDDIR%\*) do rmdir /q /s %%i
++	del /q /s %BUILDDIR%\*
++	goto end
++)
++
++if "%1" == "html" (
++	%SPHINXBUILD% -b html %ALLSPHINXOPTS% %BUILDDIR%/html
++	echo.
++	echo.Build finished. The HTML pages are in %BUILDDIR%/html.
++	goto end
++)
++
++if "%1" == "dirhtml" (
++	%SPHINXBUILD% -b dirhtml %ALLSPHINXOPTS% %BUILDDIR%/dirhtml
++	echo.
++	echo.Build finished. The HTML pages are in %BUILDDIR%/dirhtml.
++	goto end
++)
++
++if "%1" == "pickle" (
++	%SPHINXBUILD% -b pickle %ALLSPHINXOPTS% %BUILDDIR%/pickle
++	echo.
++	echo.Build finished; now you can process the pickle files.
++	goto end
++)
++
++if "%1" == "json" (
++	%SPHINXBUILD% -b json %ALLSPHINXOPTS% %BUILDDIR%/json
++	echo.
++	echo.Build finished; now you can process the JSON files.
++	goto end
++)
++
++if "%1" == "htmlhelp" (
++	%SPHINXBUILD% -b htmlhelp %ALLSPHINXOPTS% %BUILDDIR%/htmlhelp
++	echo.
++	echo.Build finished; now you can run HTML Help Workshop with the ^
++.hhp project file in %BUILDDIR%/htmlhelp.
++	goto end
++)
++
++if "%1" == "qthelp" (
++	%SPHINXBUILD% -b qthelp %ALLSPHINXOPTS% %BUILDDIR%/qthelp
++	echo.
++	echo.Build finished; now you can run "qcollectiongenerator" with the ^
++.qhcp project file in %BUILDDIR%/qthelp, like this:
++	echo.^> qcollectiongenerator %BUILDDIR%\qthelp\PyWavelets.qhcp
++	echo.To view the help file:
++	echo.^> assistant -collectionFile %BUILDDIR%\qthelp\PyWavelets.ghc
++	goto end
++)
++
++if "%1" == "latex" (
++	%SPHINXBUILD% -b latex %ALLSPHINXOPTS% %BUILDDIR%/latex
++	echo.
++	echo.Build finished; the LaTeX files are in %BUILDDIR%/latex.
++	goto end
++)
++
++if "%1" == "changes" (
++	%SPHINXBUILD% -b changes %ALLSPHINXOPTS% %BUILDDIR%/changes
++	echo.
++	echo.The overview file is in %BUILDDIR%/changes.
++	goto end
++)
++
++if "%1" == "linkcheck" (
++	%SPHINXBUILD% -b linkcheck %ALLSPHINXOPTS% %BUILDDIR%/linkcheck
++	echo.
++	echo.Link check complete; look for any errors in the above output ^
++or in %BUILDDIR%/linkcheck/output.txt.
++	goto end
++)
++
++if "%1" == "doctest" (
++	%SPHINXBUILD% -b doctest %ALLSPHINXOPTS% %BUILDDIR%/doctest
++	echo.
++	echo.Testing of doctests in the sources finished, look at the ^
++results in %BUILDDIR%/doctest/output.txt.
++	goto end
++)
++
++:end
+diff --git a/docs/make.py b/docs/make.py
+new file mode 100755
+index 0000000..5e2a591
+--- /dev/null
++++ b/docs/make.py
+@@ -0,0 +1,89 @@
++#!/usr/bin/env python
++"""
++Script to build documentation for pykokoro.
++
++This script builds the Sphinx documentation for the pykokoro package.
++It can be run using:
++    python docs/make.py [option]
++
++Options:
++    clean   - clean the build directory
++    html    - build HTML documentation
++    dirhtml - build HTML documentation with directory structure
++    all     - build all documentation formats
++    help    - show help message
++"""
++
++import os
++import shutil
++import subprocess
++import sys
++
++
++def main():
++    """Run the script."""
++    sphinx_build = "sphinx-build"
++
++    # Determine if we're being run from docs/ or from project root
++    script_dir = os.path.dirname(os.path.abspath(__file__))
++    if os.path.basename(script_dir) == "docs":
++        # Running from docs directory
++        build_dir = "_build"
++        source_dir = "."
++    else:
++        # Running from project root
++        build_dir = os.path.join("docs", "_build")
++        source_dir = "docs"
++
++    target = "html" if len(sys.argv) < 2 else sys.argv[1]
++
++    if target == "clean":
++        if os.path.exists(build_dir):
++            print(f"Cleaning {build_dir}...")
++            shutil.rmtree(build_dir)
++        return 0
++
++    if target == "help":
++        print(__doc__)
++        return 0
++
++    if not os.path.exists(build_dir):
++        os.makedirs(build_dir)
++
++    # Set of valid targets
++    valid_targets = {
++        "html",
++        "dirhtml",
++        "latex",
++        "latexpdf",
++        "text",
++        "man",
++        "changes",
++        "linkcheck",
++        "doctest",
++        "all",
++    }
++
++    if target not in valid_targets:
++        print(f"Unknown target: {target}")
++        print("Use 'help' target for help")
++        return 1
++
++    if target == "all":
++        # Build all formats
++        for fmt in ["html", "dirhtml", "latex"]:
++            cmd = [sphinx_build, "-b", fmt, source_dir, os.path.join(build_dir, fmt)]
++            print(f"Building {fmt} documentation...")
++            subprocess.run(cmd, check=True)
++    else:
++        # Build specific format
++        cmd = [sphinx_build, "-b", target, source_dir, os.path.join(build_dir, target)]
++        print(f"Building {target} documentation...")
++        subprocess.run(cmd, check=True)
++
++    print(f"Build finished. Documentation is in {os.path.join(build_dir, target)}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/docs/readio-migration.md b/docs/readio-migration.md
+index ce1374f..2eb60f8 100644
+--- a/docs/readio-migration.md
++++ b/docs/readio-migration.md
+@@ -22,26 +22,50 @@ The new independent package is not a verbatim file move: generic FFmpeg/chapter
+ 1. Capture golden baseline for `readio export` (WAV/FLAC/MP3/M4A/OGG/Opus), `readio audiobook export` (M4B metadata/chapters/cover), `readio speak --format`, cache/status/force; verify existing test suites.
+ 2. Publish an installable audioexport release; pin an explicitly tested version range in Readio, initially via an optional `audioexport` extra or mandatory dep only when stabilized.
+ 3. Add a **feature-flagged bridge**, e.g. environment/config `READIO_AUDIOEXPORT=1`. Leave default/legacy execution untouched initially. The bridge's only encoding operation is `audioexport.encode(...)` from Python, **not a subprocess invocation of `audioexport` CLI**.
+-4. In `readio/stages/export.py`, resolve the existing master WAV, `audio_format`, bitrate, output and overwrite policy using the _existing_ Readio helpers. Delegate the actual encode to `audioexport.encode(master, target, format=audio_format, bitrate=bitrate, force=replace_existing)`. Readio should keep its existing `readio.export-state` and `readio.export-index` state updates, identity, path ownership and lock. Because the new sidecar has a different identity, don't use `audioexport`'s manifest as a drop-in replacement for Readio state.
+-5. In `readio/stages/audiobook_export.py`, retain `prepare_audiobook_export()` and its freshness checks. Pass `prepared.master`, timeline file, `title`, `author`, `cover`, bitrate and output to the encoder. Preserve existing audiobook error-code translations and return fields, including `chapter_count`.
++4. In `readio/stages/export.py`, load the `audioexport.profile.v1` once and call `preflight_profile(profile, master, ffmpeg=..., ffprobe=...)` before any export write. Preflight returns `ResolvedOutput` values in TOML order, but has no destination/output-directory input and does not write or authorize replacement. For each selected output, Readio chooses its target and performs its own project freshness, collision/ownership/provenance, overwrite-authorization, lock, and state checks before calling `encode()` with the resolved format, bitrate, profile metadata, cover, and timeline. Readio then updates its own state/index/result. A single-spec operation may use `resolve_output()`; use full preflight when all configured outputs must validate.
++5. In `readio/stages/audiobook_export.py`, retain `prepare_audiobook_export()` and its project freshness checks. If the bridge uses an `audioexport.profile.v1` profile for the prepared master, load it once and preflight its complete output list before writing; Readio still performs its own target-ownership and overwrite checks before encoding. Pass the resolved timeline, cover, effective bitrate, and profile metadata along with `prepared.master` to `encode()`. Preserve Readio's title/author mapping, error-code translations, and return fields, including `chapter_count`.
+ 6. Keep the old encoding path for `speak --format` until stream/buffer parity is explicitly addressed: `audioexport.encode()` consumes an **existing file**, whereas `readio/wave.py` currently also supports **PCM streaming**. An intermediate temporary WAV adapter can work but should be isolated/tested, not silently forced on the live path.
+ 7. Run the existing Readio format, export, audiobook, CLI, API and project-state test suites. On parity, enable the flag progressively, then deprecate the redundant encoding implementation in a later PR. Rollback = feature flag off; never delete last-good artifacts.
+
+-## Bridge shape (illustrative, not a drop-in patch)
++## Profile-based bridge shape (illustrative, not a drop-in patch)
+
+ ```python
+-# Inside the existing Readio export operation, while the project lock is held,
+-# after its existing target ownership / provenance checks:
+-from audioexport import encode
+-
+-result = encode(
+-    master, target, format=audio_format,
+-    bitrate=bitrate, force=replace_existing,
++from pathlib import Path
++from audioexport import encode, load_profile, preflight_profile
++
++# Load the profile once, then prove all configured outputs are encodable before writing.
++profile = load_profile(profile_path)
++resolved_outputs = preflight_profile(
++    profile,
++    master,
++    ffmpeg=ffmpeg,
++    ffprobe=ffprobe,
+ )
+-# Readio keeps storing its OWN export state/manifest and returning its OWN API result.
+-# The new audioexport sidecar is additional, not a replacement for Readio state.
++
++for resolved in resolved_outputs:
++    target = Path(readio_destination) / resolved.filename
++
++    # Readio-owned checks happen after read-only preflight and before encode:
++    # freshness, project lock, destination collision/ownership, provenance,
++    # overwrite authorization, and state policy.
++    result = encode(
++        master,
++        target,
++        format=resolved.format,
++        bitrate=resolved.bitrate,
++        metadata=profile.metadata,
++        cover=resolved.cover,
++        timeline=resolved.timeline,
++        force=readio_authorized_replace,
++        ffmpeg=ffmpeg,
++        ffprobe=ffprobe,
++    )
++
++    # Readio stores its own state/index/result after each successful encode.
+ ```
+
++`preflight_profile()` never takes an output directory or chooses a target. It validates the complete loaded profile without creating audio, manifests, temporary files, or directories. A caller can instead call `resolve_output(profile, spec, source_stem)` when it only needs one selected output's effective settings; it still must run the appropriate Readio checks before writing.
++
+ **Important nuance:** For `readio export` with a tracked file that has changed inputs, using a new sidecar for the first time means the target appears untracked to audioexport. While bridging, Readio must explicitly authorize replace by passing `force=True` **only after Readio's own ownership check**; this applies even when its existing `force` flag was false. Never broaden replacement for arbitrary external targets.
+
+ For M4B the existing Readio source validates `composition-state` against master/timeline digests before export. AudioExport validates chapter JSON and media, but it deliberately does not know the Readio project state. Those validations must remain in Readio's wrapper.
+diff --git a/docs/requirements.txt b/docs/requirements.txt
+new file mode 100644
+index 0000000..ecff980
+--- /dev/null
++++ b/docs/requirements.txt
+@@ -0,0 +1,5 @@
++sphinx>=7.0.0
++sphinx-rtd-theme>=2.0.0
++sphinx-autobuild>=2024.0.0
++myst-parser>=2.0.0
++pillow
+diff --git a/scripts/check_package_artifacts.py b/scripts/check_package_artifacts.py
+index 8122331..85b4d04 100644
+--- a/scripts/check_package_artifacts.py
++++ b/scripts/check_package_artifacts.py
+@@ -25,6 +25,8 @@ REQUIRED_MODULES = {
+     "formats.py",
+     "pipeline.py",
+     "profile.py",
++    "preflight.py",
++    "validation.py",
+ }
+ FORBIDDEN_RUNTIME_DEPENDENCIES = {
+     "audiocompose",
+@@ -166,13 +168,21 @@ def _smoke_install(wheel: Path, version: str, source_root: Path) -> None:
+             "import importlib.metadata as metadata; "
+             "import importlib.resources as resources; "
+             "from pathlib import Path; import sys; import audioexport; "
+-            "from audioexport import encode, run_profile, load_profile, probe, doctor; "
++            "from audioexport import ResolvedOutput, resolve_output, preflight_profile, "
++            "encode, run_profile, load_profile, probe, doctor; "
++            "from audioexport.api import ResolvedOutput as ApiResolvedOutput, "
++            "resolve_output as api_resolve_output, "
++            "preflight_profile as api_preflight_profile; "
++            "assert ResolvedOutput is ApiResolvedOutput and "
++            "resolve_output is api_resolve_output and "
++            "preflight_profile is api_preflight_profile; "
+             f"assert audioexport.__version__ == metadata.version('audioexport') == {version!r}; "
+             "assert resources.files('audioexport').joinpath('py.typed').is_file(); "
+             f"assert not Path(audioexport.__file__).resolve().is_relative_to(Path({str(source_root)!r})); "
+             "assert not any(name in sys.modules for name in "
+             "('readio', 'audiocompose', 'utterplan', 'voicerender', 'soundfile', 'numpy')); "
+-            "assert all(callable(item) for item in (encode, run_profile, load_profile, probe, doctor))"
++            "assert all(callable(item) for item in (ResolvedOutput, resolve_output, "
++            "preflight_profile, encode, run_profile, load_profile, probe, doctor))"
+         )
+         result = _run([str(python), "-c", smoke], cwd=temp_root)
+         if result.returncode:
+diff --git a/tests/test_api_import.py b/tests/test_api_import.py
+index fb0ad6c..38e798a 100644
+--- a/tests/test_api_import.py
++++ b/tests/test_api_import.py
+@@ -1,6 +1,30 @@
+-from audioexport import AudiobookMetadata, AudiobookTrack, build_audiobook, encode
+-from audioexport.api import build_audiobook as api_build_audiobook
+-from audioexport.api import encode as api_encode
++from __future__ import annotations
++
++import audioexport
++from audioexport import (
++    AudiobookMetadata,
++    AudiobookTrack,
++    ResolvedOutput,
++    build_audiobook,
++    encode,
++    preflight_profile,
++    resolve_output,
++)
++from audioexport.api import (
++    ResolvedOutput as ApiResolvedOutput,
++)
++from audioexport.api import (
++    build_audiobook as api_build_audiobook,
++)
++from audioexport.api import (
++    encode as api_encode,
++)
++from audioexport.api import (
++    preflight_profile as api_preflight_profile,
++)
++from audioexport.api import (
++    resolve_output as api_resolve_output,
++)
+
+
+ def test_flat_public_api() -> None:
+@@ -8,3 +32,11 @@ def test_flat_public_api() -> None:
+     assert build_audiobook is api_build_audiobook
+     assert AudiobookTrack.__name__ == "AudiobookTrack"
+     assert AudiobookMetadata.__name__ == "AudiobookMetadata"
++    assert ResolvedOutput is ApiResolvedOutput
++    assert resolve_output is api_resolve_output
++    assert preflight_profile is api_preflight_profile
++    public_symbols = {"ResolvedOutput", "resolve_output", "preflight_profile"}
++    assert public_symbols.issubset(audioexport.__all__)
++    from audioexport import api
++
++    assert public_symbols.issubset(api.__all__)
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+new file mode 100644
+index 0000000..5a0b6d7
+--- /dev/null
++++ b/tests/test_preflight.py
+@@ -0,0 +1,278 @@
++from __future__ import annotations
++
++import json
++from pathlib import Path
++from typing import Any
++
++import pytest
++
++import audioexport.preflight as preflight_module
++from audioexport.errors import EncodingError, InvalidExportError, ToolNotFoundError
++from audioexport.preflight import preflight_profile as public_preflight
++from audioexport.profile import ExportProfile, OutputSpec, load_profile
++
++ALL_ENCODERS = frozenset(
++    {"pcm_s16le", "flac", "libmp3lame", "aac", "libvorbis", "vorbis", "libopus"}
++)
++PROBE_RESULT: dict[str, Any] = {
++    "streams": [{"codec_type": "audio", "duration": "2.0"}],
++    "format": {"duration": "2.0"},
++}
++
++
++def _tools(
++    monkeypatch: pytest.MonkeyPatch,
++    *,
++    encoders: frozenset[str] = ALL_ENCODERS,
++) -> dict[str, int]:
++    counts = {"probe": 0, "encoders": 0}
++
++    def executable(name: str, provided: str | Path | None = None) -> str:
++        return str(provided) if provided is not None else f"/tools/{name}"
++
++    def probe(source: Path, ffprobe: str) -> dict[str, Any]:
++        counts["probe"] += 1
++        assert Path(source).is_file()
++        assert ffprobe == "/tools/ffprobe"
++        return PROBE_RESULT
++
++    def available_encoders(ffmpeg: str) -> frozenset[str]:
++        counts["encoders"] += 1
++        assert ffmpeg == "/tools/ffmpeg"
++        return encoders
++
++    monkeypatch.setattr(preflight_module, "executable", executable)
++    monkeypatch.setattr(preflight_module, "probe", probe)
++    monkeypatch.setattr(preflight_module, "available_encoders", available_encoders)
++    return counts
++
++
++def _valid_cover(path: Path) -> None:
++    path.write_bytes(b"\xff\xd8\xff" + b"cover-data")
++
++
++def _valid_timeline(path: Path, start_ms: int = 0) -> None:
++    path.write_text(
++        json.dumps({"chapters": [{"title": "Intro", "start_ms": start_ms}]}),
++        encoding="utf-8",
++    )
++
++
++def test_preflight_is_public_from_its_module_and_preserves_order_without_writes(
++    tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    counts = _tools(monkeypatch)
++    cover = tmp_path / "cover.jpg"
++    timeline = tmp_path / "chapters.json"
++    _valid_cover(cover)
++    _valid_timeline(timeline)
++    profile = ExportProfile(
++        (
++            OutputSpec("flac"),
++            OutputSpec("mp3"),
++            OutputSpec("m4a"),
++            OutputSpec("m4b"),
++            OutputSpec("wav"),
++            OutputSpec("ogg"),
++            OutputSpec("opus"),
++        ),
++        {"title": "Example"},
++        cover,
++        timeline,
++    )
++    before = {path: path.read_bytes() for path in (wav, cover, timeline)}
++    uncreated_output = tmp_path / "would-be-output"
++
++    resolved = public_preflight(profile, wav)
++
++    assert [item.format for item in resolved] == ["flac", "mp3", "m4a", "m4b", "wav", "ogg", "opus"]
++    assert [item.cover is not None for item in resolved] == [
++        False,
++        True,
++        True,
++        True,
++        False,
++        False,
++        False,
++    ]
++    assert [item.timeline is not None for item in resolved] == [
++        False,
++        False,
++        True,
++        True,
++        False,
++        False,
++        False,
++    ]
++    assert counts == {"probe": 1, "encoders": 1}
++    assert not uncreated_output.exists()
++    assert {path: path.read_bytes() for path in before} == before
++    assert not list(tmp_path.glob("*.audioexport.json"))
++
++
++def test_preflight_does_not_validate_unselected_missing_global_resources(
++    tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    counts = _tools(monkeypatch)
++    profile_path = tmp_path / "flac-only.toml"
++    profile_path.write_text(
++        'schema = "audioexport.profile.v1"\n'
++        'cover = "missing.jpg"\ntimeline = "missing.json"\n'
++        '[[outputs]]\nformat = "flac"\n',
++        encoding="utf-8",
++    )
++
++    profile = load_profile(profile_path)
++    resolved = public_preflight(profile, wav)
++
++    assert len(resolved) == 1
++    assert resolved[0].cover is None
++    assert resolved[0].timeline is None
++    assert counts == {"probe": 1, "encoders": 1}
++
++
++def test_preflight_rejects_duplicate_resolved_filenames_before_tool_calls(
++    tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    counts = _tools(monkeypatch)
++    profile = ExportProfile((OutputSpec("mp3"), OutputSpec("MP3")), {})
++
++    with pytest.raises(InvalidExportError) as error:
++        public_preflight(profile, wav)
++
++    assert error.value.code == "audioexport.profile_invalid"
++    assert counts == {"probe": 0, "encoders": 0}
++
++
++def test_preflight_validates_only_requested_encoders_and_queries_once(
++    tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    counts = _tools(monkeypatch, encoders=frozenset({"aac"}))
++    profile = ExportProfile((OutputSpec("m4a"), OutputSpec("m4b")), {})
++
++    resolved = public_preflight(profile, wav)
++
++    assert [item.format for item in resolved] == ["m4a", "m4b"]
++    assert counts["encoders"] == 1
++
++
++def test_preflight_reports_a_missing_requested_encoder(
++    tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    _tools(monkeypatch, encoders=frozenset())
++
++    with pytest.raises(EncodingError) as error:
++        public_preflight(ExportProfile((OutputSpec("opus"),), {}), wav)
++
++    assert error.value.code == "audioexport.encoder_missing"
++
++
++@pytest.mark.parametrize("missing", ("ffmpeg", "ffprobe"))
++def test_preflight_reports_missing_tools(
++    tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch, missing: str
++) -> None:
++    def executable(name: str, provided: str | Path | None = None) -> str:
++        if name == missing:
++            raise ToolNotFoundError(f"missing {name}", code=f"audioexport.{name}_missing")
++        return f"/tools/{name}"
++
++    monkeypatch.setattr(preflight_module, "executable", executable)
++    profile = ExportProfile((OutputSpec("wav"),), {})
++
++    with pytest.raises(ToolNotFoundError) as error:
++        public_preflight(profile, wav)
++
++    assert error.value.code == f"audioexport.{missing}_missing"
++
++
++def test_preflight_reports_missing_source_and_invalid_duration(
++    tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    with pytest.raises(InvalidExportError) as missing:
++        public_preflight(ExportProfile((OutputSpec("wav"),), {}), tmp_path / "absent.wav")
++    assert missing.value.code == "audioexport.source_missing"
++
++    _tools(monkeypatch)
++    monkeypatch.setattr(
++        preflight_module,
++        "probe",
++        lambda source, ffprobe: {"streams": [{"codec_type": "audio"}], "format": {}},
++    )
++    with pytest.raises(InvalidExportError) as duration:
++        public_preflight(ExportProfile((OutputSpec("wav"),), {}), wav)
++    assert duration.value.code == "audioexport.duration_invalid"
++
++
++def test_preflight_validates_selected_cover_and_chapters(
++    tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    _tools(monkeypatch)
++    invalid_cover = tmp_path / "bad.jpg"
++    invalid_cover.write_bytes(b"not an image")
++    with pytest.raises(InvalidExportError) as cover_error:
++        public_preflight(ExportProfile((OutputSpec("mp3"),), {}, invalid_cover), wav)
++    assert cover_error.value.code == "audioexport.cover_invalid"
++
++    missing_timeline = tmp_path / "missing.json"
++    with pytest.raises(InvalidExportError) as timeline_error:
++        public_preflight(ExportProfile((OutputSpec("m4b"),), {}, timeline=missing_timeline), wav)
++    assert timeline_error.value.code == "audioexport.timeline_invalid"
++
++    outside_duration = tmp_path / "outside.json"
++    _valid_timeline(outside_duration, 3000)
++    with pytest.raises(InvalidExportError) as chapters_error:
++        public_preflight(ExportProfile((OutputSpec("m4b"),), {}, timeline=outside_duration), wav)
++    assert chapters_error.value.code == "audioexport.chapters_invalid"
++
++
++def test_preflight_rejects_invalid_metadata_before_tool_work(
++    tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    counts = _tools(monkeypatch)
++    profile = ExportProfile((OutputSpec("wav"),), {"bad key": "value"})
++
++    with pytest.raises(InvalidExportError) as error:
++        public_preflight(profile, wav)
++
++    assert error.value.code == "audioexport.metadata_invalid"
++    assert counts == {"probe": 0, "encoders": 0}
++
++
++def test_preflight_validates_each_shared_resource_once(
++    tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    _tools(monkeypatch)
++    cover = tmp_path / "cover.jpg"
++    timeline = tmp_path / "chapters.json"
++    _valid_cover(cover)
++    _valid_timeline(timeline)
++    calls = {"cover": 0, "timeline": 0, "normalize": 0}
++    original_cover_kind = preflight_module.cover_kind
++    original_load_chapters = preflight_module.load_chapters
++    original_normalize_chapters = preflight_module.normalize_chapters
++
++    def check_cover(path: Path) -> str:
++        calls["cover"] += 1
++        return original_cover_kind(path)
++
++    def read_timeline(path: Path) -> tuple[Any, ...]:
++        calls["timeline"] += 1
++        return original_load_chapters(path)
++
++    def normalize(chapters: tuple[Any, ...], duration_ms: int) -> tuple[Any, ...]:
++        calls["normalize"] += 1
++        return original_normalize_chapters(chapters, duration_ms)
++
++    monkeypatch.setattr(preflight_module, "cover_kind", check_cover)
++    monkeypatch.setattr(preflight_module, "load_chapters", read_timeline)
++    monkeypatch.setattr(preflight_module, "normalize_chapters", normalize)
++    profile = ExportProfile(
++        (OutputSpec("mp3"), OutputSpec("m4a"), OutputSpec("m4b")),
++        {},
++        cover,
++        timeline,
++    )
++
++    public_preflight(profile, wav)
++
++    assert calls == {"cover": 1, "timeline": 1, "normalize": 1}
+diff --git a/tests/test_probe_and_doctor.py b/tests/test_probe_and_doctor.py
+index cacc729..4933c01 100644
+--- a/tests/test_probe_and_doctor.py
++++ b/tests/test_probe_and_doctor.py
+@@ -123,6 +123,7 @@ def test_doctor_uses_native_vorbis_when_libvorbis_is_missing(
+ def test_profile_encoder_failure_is_preflighted_before_output(
+     tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
+ ) -> None:
++    import audioexport.preflight as preflight_module
+     from audioexport import pipeline
+
+     profile = tmp_path / "needs-opus.toml"
+@@ -132,26 +133,28 @@ def test_profile_encoder_failure_is_preflighted_before_output(
+         '[[outputs]]\nformat = "opus"\n',
+         encoding="utf-8",
+     )
+-    formats = {
+-        name: {"available": name != "opus", "reason": "libopus is missing"}
+-        for name in ("wav", "flac", "mp3", "m4a", "m4b", "ogg", "opus")
+-    }
+     monkeypatch.setattr(
+-        pipeline,
+-        "fftool_doctor",
+-        lambda **kwargs: {
+-            "tools": {
+-                "ffmpeg": {"available": True},
+-                "ffprobe": {"available": True},
+-            },
+-            "formats": formats,
+-            "requested_formats_ready": False,
++        preflight_module,
++        "executable",
++        lambda name, provided=None: f"/tools/{name}",
++    )
++    monkeypatch.setattr(
++        preflight_module,
++        "probe",
++        lambda source, ffprobe: {
++            "streams": [{"codec_type": "audio", "duration": "2.0"}],
++            "format": {"duration": "2.0"},
+         },
+     )
++    monkeypatch.setattr(
++        preflight_module,
++        "available_encoders",
++        lambda ffmpeg: frozenset({"pcm_s16le"}),
++    )
+     out = tmp_path / "out"
+
+     with pytest.raises(EncodingError) as error:
+         pipeline.run_profile(wav, profile, out)
+
+-    assert error.value.code == "audioexport.encoder_unavailable"
++    assert error.value.code == "audioexport.encoder_missing"
+     assert not out.exists()
+diff --git a/tests/test_profile_resolution.py b/tests/test_profile_resolution.py
+new file mode 100644
+index 0000000..a1f20be
+--- /dev/null
++++ b/tests/test_profile_resolution.py
+@@ -0,0 +1,169 @@
++from __future__ import annotations
++
++from pathlib import Path
++from typing import cast
++
++import pytest
++
++from audioexport.errors import InvalidExportError
++from audioexport.formats import FORMATS
++from audioexport.profile import ExportProfile, OutputSpec, load_profile, resolve_output
++
++FORMATS_IN_ORDER = ("wav", "flac", "mp3", "m4a", "m4b", "ogg", "opus")
++COVER_FORMATS = {"mp3", "m4a", "m4b"}
++CHAPTER_FORMATS = {"m4a", "m4b"}
++
++
++def _error_code(error: pytest.ExceptionInfo[InvalidExportError], code: str) -> None:
++    assert error.value.code == code
++
++
++def test_automatic_resolution_matrix_and_effective_bitrates(tmp_path: Path) -> None:
++    cover = tmp_path / "not-created.jpg"
++    timeline = tmp_path / "not-created.json"
++    profile = ExportProfile((), {}, cover, timeline)
++    expected_bitrates = {
++        "wav": None,
++        "flac": None,
++        "mp3": "192k",
++        "m4a": "192k",
++        "m4b": "192k",
++        "ogg": None,
++        "opus": "96k",
++    }
++
++    for fmt in FORMATS_IN_ORDER:
++        resolved = resolve_output(profile, OutputSpec(fmt), "book")
++        assert resolved.format == fmt
++        assert resolved.filename == f"book{FORMATS[fmt].extension}"
++        assert resolved.bitrate == expected_bitrates[fmt]
++        assert (resolved.cover == cover) is (fmt in COVER_FORMATS)
++        assert (resolved.timeline == timeline) is (fmt in CHAPTER_FORMATS)
++
++
++def test_profile_loader_parses_optional_flags_and_keeps_relative_resources(tmp_path: Path) -> None:
++    profile_path = tmp_path / "profiles" / "export.toml"
++    profile_path.parent.mkdir()
++    profile_path.write_text(
++        'schema = "audioexport.profile.v1"\n'
++        'cover = "missing-cover.jpg"\ntimeline = "missing-chapters.json"\n'
++        '[[outputs]]\nformat = "mp3"\n'
++        '[[outputs]]\nformat = "m4b"\nuse_cover = true\nuse_chapters = false\n',
++        encoding="utf-8",
++    )
++
++    profile = load_profile(profile_path)
++    assert profile.outputs[0].use_cover is None
++    assert profile.outputs[0].use_chapters is None
++    assert profile.outputs[1].use_cover is True
++    assert profile.outputs[1].use_chapters is False
++    assert profile.cover == (profile_path.parent / "missing-cover.jpg").resolve()
++    assert profile.timeline == (profile_path.parent / "missing-chapters.json").resolve()
++    assert resolve_output(profile, profile.outputs[1], "book").timeline is None
++
++
++def test_v1_profile_without_new_fields_still_loads(tmp_path: Path) -> None:
++    path = tmp_path / "old.toml"
++    path.write_text(
++        'schema = "audioexport.profile.v1"\n'
++        '[[outputs]]\nformat = "mp3"\nfilename = "custom.mp3"\nbitrate = "128k"\n',
++        encoding="utf-8",
++    )
++
++    profile = load_profile(path)
++    assert profile.outputs == (OutputSpec("mp3", "custom.mp3", "128k"),)
++    assert resolve_output(profile, profile.outputs[0], "unused").filename == "custom.mp3"
++
++
++@pytest.mark.parametrize("flag", ("use_cover", "use_chapters"))
++def test_profile_loader_rejects_non_boolean_flags(tmp_path: Path, flag: str) -> None:
++    path = tmp_path / "bad.toml"
++    path.write_text(
++        f'schema = "audioexport.profile.v1"\n[[outputs]]\nformat = "m4b"\n{flag} = "yes"\n',
++        encoding="utf-8",
++    )
++
++    with pytest.raises(InvalidExportError) as error:
++        load_profile(path)
++    _error_code(error, "audioexport.profile_invalid")
++
++
++def test_unknown_output_fields_remain_rejected(tmp_path: Path) -> None:
++    path = tmp_path / "unknown.toml"
++    path.write_text(
++        'schema = "audioexport.profile.v1"\n[[outputs]]\nformat = "wav"\nother = true\n',
++        encoding="utf-8",
++    )
++
++    with pytest.raises(InvalidExportError) as error:
++        load_profile(path)
++    _error_code(error, "audioexport.profile_invalid")
++
++
++def test_explicit_selectors_can_suppress_resources_and_require_them(tmp_path: Path) -> None:
++    profile = ExportProfile((), {}, tmp_path / "cover.jpg", tmp_path / "chapters.json")
++    no_resources = resolve_output(
++        profile, OutputSpec("m4b", use_cover=False, use_chapters=False), "book"
++    )
++    assert no_resources.cover is None
++    assert no_resources.timeline is None
++
++    missing = ExportProfile((), {})
++    with pytest.raises(InvalidExportError) as cover_error:
++        resolve_output(missing, OutputSpec("mp3", use_cover=True), "book")
++    _error_code(cover_error, "audioexport.cover_required")
++    with pytest.raises(InvalidExportError) as chapter_error:
++        resolve_output(missing, OutputSpec("m4a", use_chapters=True), "book")
++    _error_code(chapter_error, "audioexport.chapters_required")
++
++
++def test_explicit_selectors_reject_unsupported_formats() -> None:
++    profile = ExportProfile((), {}, Path("cover.jpg"), Path("chapters.json"))
++    with pytest.raises(InvalidExportError) as cover_error:
++        resolve_output(profile, OutputSpec("flac", use_cover=True), "book")
++    _error_code(cover_error, "audioexport.cover_unsupported")
++    with pytest.raises(InvalidExportError) as chapter_error:
++        resolve_output(profile, OutputSpec("mp3", use_chapters=True), "book")
++    _error_code(chapter_error, "audioexport.chapters_unsupported")
++
++
++def test_explicit_filename_is_literal_and_bitrate_is_normalized() -> None:
++    result = resolve_output(
++        ExportProfile((), {}), OutputSpec("MP3", "{stem}.mp3", "128k"), "ignored"
++    )
++    assert result.format == "mp3"
++    assert result.filename == "{stem}.mp3"
++    assert result.bitrate == "128k"
++
++
++@pytest.mark.parametrize("filename", ("../book.mp3", r"..\\book.mp3", "book.wav"))
++def test_resolver_rejects_unsafe_or_mismatched_explicit_filename(filename: str) -> None:
++    with pytest.raises(InvalidExportError) as error:
++        resolve_output(ExportProfile((), {}), OutputSpec("mp3", filename), "book")
++    _error_code(error, "audioexport.profile_invalid")
++
++
++@pytest.mark.parametrize("source_stem", ("", "../book", r"folder\\book", "."))
++def test_resolver_rejects_unsafe_source_stem(source_stem: str) -> None:
++    with pytest.raises(InvalidExportError) as error:
++        resolve_output(ExportProfile((), {}), OutputSpec("mp3"), source_stem)
++    _error_code(error, "audioexport.profile_invalid")
++
++
++def test_resolver_validates_manually_constructed_selector_types() -> None:
++    with pytest.raises(InvalidExportError) as error:
++        resolve_output(ExportProfile((), {}), OutputSpec("mp3", use_cover=cast(bool, 1)), "book")
++    _error_code(error, "audioexport.profile_invalid")
++
++
++def test_explicit_filename_loader_rejects_duplicates_and_unknown_fields(tmp_path: Path) -> None:
++    path = tmp_path / "duplicate.toml"
++    path.write_text(
++        'schema = "audioexport.profile.v1"\n'
++        '[[outputs]]\nformat = "mp3"\nfilename = "book.mp3"\n'
++        '[[outputs]]\nformat = "mp3"\nfilename = "BOOK.mp3"\n',
++        encoding="utf-8",
++    )
++    with pytest.raises(InvalidExportError) as error:
++        load_profile(path)
++    _error_code(error, "audioexport.profile_invalid")
+diff --git a/tests/test_profiles_multiformat.py b/tests/test_profiles_multiformat.py
+index f929004..bf28961 100644
+--- a/tests/test_profiles_multiformat.py
++++ b/tests/test_profiles_multiformat.py
+@@ -121,7 +121,9 @@ def test_profile_preflight_detects_default_and_explicit_name_collision(
+     assert not out.exists()
+
+
+-def test_profile_rejects_non_boolean_selectors_and_missing_resources(tmp_path: Path) -> None:
++def test_profile_rejects_non_boolean_selectors_but_defers_missing_resources(
++    tmp_path: Path,
++) -> None:
+     non_boolean = tmp_path / "bad-selector.toml"
+     non_boolean.write_text(
+         'schema = "audioexport.profile.v1"\n[[outputs]]\nformat = "mp3"\nuse_cover = "yes"\n',
+@@ -135,8 +137,9 @@ def test_profile_rejects_non_boolean_selectors_and_missing_resources(tmp_path: P
+         'schema = "audioexport.profile.v1"\ncover = "absent.jpg"\n[[outputs]]\nformat = "mp3"\n',
+         encoding="utf-8",
+     )
+-    with pytest.raises(InvalidExportError, match="existing file"):
+-        load_profile(missing)
++    profile = load_profile(missing)
++    assert profile.cover == (tmp_path / "absent.jpg").resolve()
++    assert resolve_output(profile, profile.outputs[0], "book").cover == profile.cover
+
+
+ def test_profile_cache_identity_tracks_only_consumed_resources(
+@@ -147,40 +150,68 @@ def test_profile_cache_identity_tracks_only_consumed_resources(
+     _write_cover(cover)
+     _timeline(timeline)
+     profile = tmp_path / "cache.toml"
++    formats = ("wav", "flac", "mp3", "m4a", "m4b", "ogg", "opus")
+
+     def set_profile(*, bitrate: str = "128k", title: str = "Book") -> None:
++        outputs = []
++        for fmt in formats:
++            options = f'bitrate = "{bitrate}"\n' if fmt == "mp3" else ""
++            outputs.append(f"[[outputs]]\nformat = {fmt!r}\n{options}")
+         profile.write_text(
+             'schema = "audioexport.profile.v1"\n'
+             'cover = "cover.jpg"\n'
+             'timeline = "chapters.json"\n'
+-            f'[metadata]\ntitle = "{title}"\n'
+-            '[[outputs]]\nformat = "mp3"\n'
+-            f'bitrate = "{bitrate}"\nuse_chapters = false\n'
+-            '[[outputs]]\nformat = "m4b"\n',
++            f'[metadata]\ntitle = "{title}"\n' + "".join(outputs),
+             encoding="utf-8",
+         )
+
++    out = tmp_path / "out"
+     set_profile()
+-    initial = run_profile(wav, profile, tmp_path / "out")
+-    repeated = run_profile(wav, profile, tmp_path / "out")
+-    assert [result.reused for result in repeated] == [True, True]
++    initial = run_profile(wav, profile, out)
++    repeated = run_profile(wav, profile, out)
++    assert [result.format for result in initial] == list(formats)
++    assert [result.reused for result in repeated] == [True] * len(formats)
+     assert [result.export_id for result in repeated] == [result.export_id for result in initial]
+
+     _timeline(timeline, "Changed chapter")
+-    timeline_changed = run_profile(wav, profile, tmp_path / "out")
+-    assert [result.reused for result in timeline_changed] == [True, False]
++    timeline_changed = run_profile(wav, profile, out)
++    assert [result.reused for result in timeline_changed] == [
++        True,
++        True,
++        True,
++        False,
++        False,
++        True,
++        True,
++    ]
+
+     set_profile(bitrate="192k")
+-    bitrate_changed = run_profile(wav, profile, tmp_path / "out")
+-    assert [result.reused for result in bitrate_changed] == [False, True]
++    bitrate_changed = run_profile(wav, profile, out)
++    assert [result.reused for result in bitrate_changed] == [
++        True,
++        True,
++        False,
++        True,
++        True,
++        True,
++        True,
++    ]
+
+     _write_cover(cover, "blue")
+-    cover_changed = run_profile(wav, profile, tmp_path / "out")
+-    assert [result.reused for result in cover_changed] == [False, False]
+-
+-    set_profile(title="Updated Book")
+-    metadata_changed = run_profile(wav, profile, tmp_path / "out")
+-    assert [result.reused for result in metadata_changed] == [False, False]
++    cover_changed = run_profile(wav, profile, out)
++    assert [result.reused for result in cover_changed] == [
++        True,
++        True,
++        False,
++        False,
++        False,
++        True,
++        True,
++    ]
++
++    set_profile(bitrate="192k", title="Updated Book")
++    metadata_changed = run_profile(wav, profile, out)
++    assert [result.reused for result in metadata_changed] == [False] * len(formats)
+
+
+ def test_direct_encode_keeps_unsupported_timeline_strict(tmp_path: Path, wav: Path) -> None:
