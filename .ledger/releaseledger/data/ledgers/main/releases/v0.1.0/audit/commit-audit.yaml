@@ -1,0 +1,141 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.1.0
+git_base_ref: 03b6e92
+git_base_sha: 03b6e92ffeb1d5fc80911ea9487329c43ade9a5b
+git_head_ref: HEAD
+git_head_sha: a61e986f7d8f5534ed12269f39160226c3f03773
+git_range: 03b6e92ffeb1d5fc80911ea9487329c43ade9a5b..a61e986f7d8f5534ed12269f39160226c3f03773
+commit_count: 2
+rows:
+  - sha: 5e1e3c93adea067337b8c0367749c212eb54c974
+    source_ref: git:5e1e3c93adea067337b8c0367749c212eb54c974
+    short_sha: 5e1e3c9
+    changed_paths:
+      - .codecrate.toml
+      - .github/workflows/tests.yml
+      - .gitignore
+      - .ledger/ledger.toml
+      - .ledger/releaseledger/.ledger-project.toml
+      - .ledger/releaseledger/config.toml
+      - .ledger/releaseledger/data/.ledger-project.toml
+      - .ledger/taskledger/.ledger-project.toml
+      - .ledger/taskledger/config.toml
+      - .pre-commit-config.yaml
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/__main__.py
+      - audioexport/api.py
+      - audioexport/chapters.py
+      - audioexport/cli.py
+      - audioexport/errors.py
+      - audioexport/fftools.py
+      - audioexport/formats.py
+      - audioexport/pipeline.py
+      - audioexport/profile.py
+      - audioexport/py.typed
+      - docs/readio-migration.md
+      - examples/chapters.json
+      - examples/create_demo_wav.py
+      - examples/export.toml
+      - pyproject.toml
+      - tests/conftest.py
+      - tests/test_api_import.py
+      - tests/test_cli.py
+      - tests/test_core.py
+      - tests/test_cover_and_errors.py
+    stats:
+      files_changed: 32
+      insertions: 2027
+      deletions: 1
+    inspected: true
+    inspected_paths:
+      - README.md
+      - pyproject.toml
+      - audioexport/__init__.py
+      - audioexport/api.py
+      - audioexport/chapters.py
+      - audioexport/cli.py
+      - audioexport/errors.py
+      - audioexport/fftools.py
+      - audioexport/formats.py
+      - audioexport/pipeline.py
+      - audioexport/profile.py
+      - docs/readio-migration.md
+      - examples/chapters.json
+      - examples/export.toml
+      - tests/test_core.py
+      - tests/test_cli.py
+      - tests/test_cover_and_errors.py
+    observed_behavior:
+      "Provides an independent Python API and CLI for FFmpeg-based
+      audio export across WAV, FLAC, MP3, M4A, M4B, OGG, and Opus. Supports metadata,
+      validated chapter timelines, optional cover art, FFprobe verification, content-addressed
+      export identities, reusable sidecar manifests, and safe output handling without
+      importing Readio or synthesis engines. The public errors, examples, migration
+      boundary, and tests document the standalone contract.
+
+      "
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: initial version"
+    target_entry_id: entry-0001
+    notes: Initial standalone product surface and documented compatibility boundary.
+  - sha: a61e986f7d8f5534ed12269f39160226c3f03773
+    source_ref: git:a61e986f7d8f5534ed12269f39160226c3f03773
+    short_sha: a61e986
+    changed_paths:
+      - .github/workflows/release.yml
+      - .github/workflows/tests.yml
+      - MANIFEST.in
+      - README.md
+      - audioexport/fftools.py
+      - audioexport/pipeline.py
+      - audioexport/profile.py
+      - examples/chapters.json
+      - examples/export.toml
+      - pyproject.toml
+      - scripts/check_package_artifacts.py
+      - tests/test_atomicity.py
+      - tests/test_chapter_precision.py
+      - tests/test_probe_and_doctor.py
+      - tests/test_profiles_multiformat.py
+    stats:
+      files_changed: 15
+      insertions: 1637
+      deletions: 116
+    inspected: true
+    inspected_paths:
+      - README.md
+      - MANIFEST.in
+      - pyproject.toml
+      - audioexport/fftools.py
+      - audioexport/pipeline.py
+      - audioexport/profile.py
+      - examples/chapters.json
+      - examples/export.toml
+      - scripts/check_package_artifacts.py
+      - tests/test_atomicity.py
+      - tests/test_chapter_precision.py
+      - tests/test_probe_and_doctor.py
+      - tests/test_profiles_multiformat.py
+    observed_behavior:
+      "Extends the exporter with profile-driven multi-format runs,
+      capability-aware diagnostics, precise chapter handling, transactional output and
+      manifest recovery, concurrent-writer protection, and package artifact checks.
+      Adds cross-platform release and test automation plus documentation and packaging
+      metadata needed to build, validate, and publish the standalone distribution.
+
+      "
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: prepare for release"
+    target_entry_id: entry-0002
+    notes:
+      Release-readiness and reliability improvements validated by focused tests
+      and package checks.

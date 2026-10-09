@@ -138,6 +138,7 @@ format = "wav"
 When a selector is omitted (`None`), configured global artwork is attached automatically only to MP3/M4A/M4B, and chapters only to M4A/M4B; unsupported formats skip those global resources. `true` requires the resource and a capable format; `false` suppresses it. For example, to enable artwork, set a valid top-level `cover` and `use_cover = true` on the MP3/M4A/M4B rows. Direct `encode()` calls remain strict: unsupported cover/chapter arguments are errors.
 
 `run_profile()` validates every row, resource, capability, and concrete filename collision before the first encode, then returns results in TOML order. Resource paths are relative to the profile file. Explicit `filename` values are literal simple filenames with the matching extension; no template expansion or nested paths are supported. If omitted, each filename uses the input stem. Profile-wide metadata is inherited by every output; there is no per-output metadata override.
+
 ## Chapters/timeline
 
 Use an independent JSON file such as [`examples/chapters.json`](examples/chapters.json):
@@ -164,6 +165,7 @@ Encoding uses argument-vector subprocess calls (`shell=False`) and stages both a
 Version is dynamic through `setuptools-scm`: `pyproject.toml` has no static `version` field, and Git tags determine wheel/sdist metadata, `audioexport.__version__`, and CLI output. The project supports Python 3.10+ and retains the flat `audioexport/` layout. Unversioned archives use a development fallback; a fallback build must never be treated as final `0.1.0`.
 
 For a release, first commit the code and wait for the complete Linux/Windows/macOS, Python 3.10/3.13 CI matrix. Then create and push the intended version tag (for example `v0.1.0`). Manually dispatch `.github/workflows/release.yml` with that existing tag. It reruns the test matrix, checks the tag against wheel/sdist metadata, inspects package contents, installs the wheel outside the checkout, and checks CLI/API version parity. Publishing uses PyPI trusted publishing only after the `pypi` GitHub environment is approved; repository administrators must configure required reviewers for that environment and register the trusted publisher on PyPI. Do not publish from an untagged/fallback build.
+
 ## Readio migration
 
 **Readio is deliberately not patched by this project.** Its existing export commands continue using their current code until an opt-in bridge is tested. A future integration must call AudioExport's Python library API; it must never launch the `audioexport` CLI as a subprocess. See [`docs/readio-migration.md`](docs/readio-migration.md) for the compatibility boundary, integration order, and rollback rules. Readio continues owning project locks, path defaults, staleness, indexed state, and orchestration.

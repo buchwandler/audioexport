@@ -1,0 +1,82 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.0
+git_base_ref: 03b6e92ffeb1d5fc80911ea9487329c43ade9a5b
+git_base_sha: 03b6e92ffeb1d5fc80911ea9487329c43ade9a5b
+git_head_ref: a61e986f7d8f5534ed12269f39160226c3f03773
+git_head_sha: a61e986f7d8f5534ed12269f39160226c3f03773
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: Added standalone FFmpeg export API and CLI for seven formats with metadata, chapters, cover art, and manifests
+    status: accepted
+    source_refs:
+      - git:5e1e3c93adea067337b8c0367749c212eb54c974
+    paths:
+      - .codecrate.toml
+      - .github/workflows/tests.yml
+      - .gitignore
+      - .ledger/ledger.toml
+      - .ledger/releaseledger/.ledger-project.toml
+      - .ledger/releaseledger/config.toml
+      - .ledger/releaseledger/data/.ledger-project.toml
+      - .ledger/taskledger/.ledger-project.toml
+      - .ledger/taskledger/config.toml
+      - .pre-commit-config.yaml
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/__main__.py
+      - audioexport/api.py
+      - audioexport/chapters.py
+      - audioexport/cli.py
+      - audioexport/errors.py
+      - audioexport/fftools.py
+      - audioexport/formats.py
+      - audioexport/pipeline.py
+      - audioexport/profile.py
+      - audioexport/py.typed
+      - docs/readio-migration.md
+      - examples/chapters.json
+      - examples/create_demo_wav.py
+      - examples/export.toml
+      - pyproject.toml
+      - tests/conftest.py
+      - tests/test_api_import.py
+      - tests/test_cli.py
+      - tests/test_core.py
+      - tests/test_cover_and_errors.py
+    sources:
+      - git:5e1e3c93adea067337b8c0367749c212eb54c974
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: changed
+    summary: Changed exports with multi-format profiles, diagnostics, transactional recovery, writer locking, and release checks
+    status: accepted
+    source_refs:
+      - git:a61e986f7d8f5534ed12269f39160226c3f03773
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/tests.yml
+      - MANIFEST.in
+      - README.md
+      - audioexport/fftools.py
+      - audioexport/pipeline.py
+      - audioexport/profile.py
+      - examples/chapters.json
+      - examples/export.toml
+      - pyproject.toml
+      - scripts/check_package_artifacts.py
+      - tests/test_atomicity.py
+      - tests/test_chapter_precision.py
+      - tests/test_probe_and_doctor.py
+      - tests/test_profiles_multiformat.py
+    sources:
+      - git:a61e986f7d8f5534ed12269f39160226c3f03773
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
