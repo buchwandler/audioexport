@@ -26,7 +26,7 @@ jobs:
 
       - name: Generate coverage and test reports
         run: |
-          python -m pytest --cov=audiocompose --cov-report=xml --junitxml=junit.xml
+          python -m pytest --cov=audioexport --cov-report=xml --junitxml=junit.xml
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
