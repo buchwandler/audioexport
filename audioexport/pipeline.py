@@ -5,9 +5,7 @@ from __future__ import annotations
 import getpass
 import hashlib
 import json
-import math
 import os
-import re
 import shutil
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
@@ -20,10 +18,13 @@ from typing import Any
 
 from .chapters import Chapter, ffmetadata_text, load_chapters, normalize_chapters
 from .errors import EncodingError, InvalidExportError, VerificationError
-from .fftools import doctor as fftool_doctor
 from .fftools import encoder_for_format, executable, probe, run, version
 from .formats import EXPECTED_CODECS, FORMATS, encoder_options, normalize_bitrate, normalize_format
-from .profile import ExportProfile, ResolvedOutput, load_profile, resolve_output
+from .preflight import preflight_profile
+from .profile import load_profile
+from .validation import cover_kind as _cover_kind
+from .validation import duration_ms as _duration_ms
+from .validation import validate_metadata as _validate_metadata
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,52 +63,6 @@ def sha256_file(path: Path) -> str:
 def _canonical_hash(payload: Mapping[str, Any]) -> str:
     canonical = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
-
-
-def _duration_ms(info: Mapping[str, Any]) -> int:
-    try:
-        streams = info["streams"]
-        stream = next(row for row in streams if row.get("codec_type") == "audio")
-        raw = stream.get("duration") or info["format"].get("duration")
-        seconds = float(raw)
-        if not math.isfinite(seconds) or seconds <= 0:
-            raise ValueError("non-positive duration")
-        return round(seconds * 1000)
-    except (ValueError, TypeError, KeyError, StopIteration) as exc:
-        raise InvalidExportError(
-            "source has no valid positive duration", code="audioexport.duration_invalid"
-        ) from exc
-
-
-def _validate_metadata(metadata: Mapping[str, str] | None) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for key, value in (metadata or {}).items():
-        if (
-            not isinstance(key, str)
-            or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", key)
-            or not isinstance(value, str)
-        ):
-            raise InvalidExportError(
-                "metadata must be string key/value pairs with simple keys",
-                code="audioexport.metadata_invalid",
-            )
-        result[key.lower()] = value
-    return dict(sorted(result.items()))
-
-
-def _cover_kind(path: Path) -> str:
-    try:
-        with path.open("rb") as stream:
-            signature = stream.read(8)
-    except OSError as exc:
-        raise InvalidExportError(
-            f"cover not readable: {path}", code="audioexport.cover_invalid"
-        ) from exc
-    if signature.startswith(b"\xff\xd8\xff"):
-        return "mjpeg"
-    if signature == b"\x89PNG\r\n\x1a\n":
-        return "png"
-    raise InvalidExportError("cover must be JPEG or PNG", code="audioexport.cover_invalid")
 
 
 def _manifest_path(output: Path) -> Path:
@@ -638,65 +593,6 @@ def encode(
         )
 
 
-def _preflight_profile(
-    profile: ExportProfile,
-    source: Path | str,
-    out_dir: Path,
-    *,
-    ffprobe: Path | str | None,
-    ffmpeg: Path | str | None,
-) -> tuple[tuple[ResolvedOutput, Path], ...]:
-    """Resolve and validate every profile output before any encoder can write."""
-    src = Path(source).expanduser().absolute()
-    if not src.is_file():
-        raise InvalidExportError(f"source audio missing: {src}", code="audioexport.source_missing")
-    source_real = src.resolve()
-    seen_names: set[str] = set()
-    planned: list[tuple[ResolvedOutput, Path]] = []
-    checked_timeline: Path | None = None
-    for spec in profile.outputs:
-        resolved = resolve_output(profile, spec, src.stem)
-        key = resolved.filename.casefold()
-        if key in seen_names:
-            raise InvalidExportError(
-                "duplicate profile output filenames", code="audioexport.profile_invalid"
-            )
-        seen_names.add(key)
-        destination = out_dir / resolved.filename
-        if destination.resolve() == source_real:
-            raise InvalidExportError(
-                "input and output must be different files", code="audioexport.same_path"
-            )
-        if resolved.cover is not None:
-            _cover_kind(resolved.cover)
-        if resolved.timeline is not None and resolved.timeline != checked_timeline:
-            chapters = load_chapters(resolved.timeline)
-            source_info = probe(src, ffprobe)
-            normalize_chapters(chapters, _duration_ms(source_info))
-            checked_timeline = resolved.timeline
-        planned.append((resolved, destination))
-    formats = tuple(spec.format for spec in profile.outputs)
-    capabilities = fftool_doctor(ffmpeg=ffmpeg, ffprobe=ffprobe, requested_formats=formats)
-    for name, override in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)):
-        if not capabilities["tools"][name]["available"]:
-            executable(name, override)
-            raise EncodingError(
-                f"{name} is not ready: {capabilities['tools'][name].get('error', 'unavailable')}",
-                code="audioexport.tool_failed",
-            )
-    if not capabilities["requested_formats_ready"]:
-        unavailable = [
-            f"{fmt}: {capabilities['formats'][fmt].get('reason', 'encoder unavailable')}"
-            for fmt in formats
-            if capabilities["formats"][fmt]["available"] is not True
-        ]
-        raise EncodingError(
-            "required FFmpeg encoders unavailable: " + "; ".join(unavailable),
-            code="audioexport.encoder_unavailable",
-        )
-    return tuple(planned)
-
-
 def run_profile(
     source: Path | str,
     profile: Path | str,
@@ -709,9 +605,22 @@ def run_profile(
     """Batch-export an ordinary audio file using a portable TOML export profile."""
     configuration = load_profile(profile)
     root = Path(out_dir).expanduser().absolute()
-    planned = _preflight_profile(configuration, source, root, ffprobe=ffprobe, ffmpeg=ffmpeg)
+    resolved_outputs = preflight_profile(
+        configuration,
+        source,
+        ffmpeg=ffmpeg,
+        ffprobe=ffprobe,
+    )
+    source_real = Path(source).expanduser().absolute().resolve()
+    destinations = tuple(root / item.filename for item in resolved_outputs)
+    for destination in destinations:
+        if destination.resolve() == source_real:
+            raise InvalidExportError(
+                "input and output must be different files", code="audioexport.same_path"
+            )
+
     outputs = []
-    for item, destination in planned:
+    for item, destination in zip(resolved_outputs, destinations):
         result = encode(
             source,
             destination,

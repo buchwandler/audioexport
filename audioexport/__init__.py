@@ -18,7 +18,8 @@ from .fftools import doctor, probe
 from .formats import FORMATS, normalize_bitrate
 from .metadata import AudiobookMetadata
 from .pipeline import ExportResult, encode, run_profile
-from .profile import ExportProfile, OutputSpec, load_profile
+from .preflight import preflight_profile
+from .profile import ExportProfile, OutputSpec, ResolvedOutput, load_profile, resolve_output
 
 try:
     __version__ = version("audioexport")
@@ -39,6 +40,7 @@ __all__ = [
     "ExportResult",
     "InvalidExportError",
     "OutputSpec",
+    "ResolvedOutput",
     "ToolNotFoundError",
     "VerificationError",
     "__version__",
@@ -49,6 +51,8 @@ __all__ = [
     "load_chapters",
     "load_profile",
     "normalize_bitrate",
+    "preflight_profile",
     "probe",
+    "resolve_output",
     "run_profile",
 ]

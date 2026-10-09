@@ -22,25 +22,49 @@ The new independent package is not a verbatim file move: generic FFmpeg/chapter 
 1. Capture golden baseline for `readio export` (WAV/FLAC/MP3/M4A/OGG/Opus), `readio audiobook export` (M4B metadata/chapters/cover), `readio speak --format`, cache/status/force; verify existing test suites.
 2. Publish an installable audioexport release; pin an explicitly tested version range in Readio, initially via an optional `audioexport` extra or mandatory dep only when stabilized.
 3. Add a **feature-flagged bridge**, e.g. environment/config `READIO_AUDIOEXPORT=1`. Leave default/legacy execution untouched initially. The bridge's only encoding operation is `audioexport.encode(...)` from Python, **not a subprocess invocation of `audioexport` CLI**.
-4. In `readio/stages/export.py`, resolve the existing master WAV, `audio_format`, bitrate, output and overwrite policy using the _existing_ Readio helpers. Delegate the actual encode to `audioexport.encode(master, target, format=audio_format, bitrate=bitrate, force=replace_existing)`. Readio should keep its existing `readio.export-state` and `readio.export-index` state updates, identity, path ownership and lock. Because the new sidecar has a different identity, don't use `audioexport`'s manifest as a drop-in replacement for Readio state.
-5. In `readio/stages/audiobook_export.py`, retain `prepare_audiobook_export()` and its freshness checks. Pass `prepared.master`, timeline file, `title`, `author`, `cover`, bitrate and output to the encoder. Preserve existing audiobook error-code translations and return fields, including `chapter_count`.
+4. In `readio/stages/export.py`, load the `audioexport.profile.v1` once and call `preflight_profile(profile, master, ffmpeg=..., ffprobe=...)` before any export write. Preflight returns `ResolvedOutput` values in TOML order, but has no destination/output-directory input and does not write or authorize replacement. For each selected output, Readio chooses its target and performs its own project freshness, collision/ownership/provenance, overwrite-authorization, lock, and state checks before calling `encode()` with the resolved format, bitrate, profile metadata, cover, and timeline. Readio then updates its own state/index/result. A single-spec operation may use `resolve_output()`; use full preflight when all configured outputs must validate.
+5. In `readio/stages/audiobook_export.py`, retain `prepare_audiobook_export()` and its project freshness checks. If the bridge uses an `audioexport.profile.v1` profile for the prepared master, load it once and preflight its complete output list before writing; Readio still performs its own target-ownership and overwrite checks before encoding. Pass the resolved timeline, cover, effective bitrate, and profile metadata along with `prepared.master` to `encode()`. Preserve Readio's title/author mapping, error-code translations, and return fields, including `chapter_count`.
 6. Keep the old encoding path for `speak --format` until stream/buffer parity is explicitly addressed: `audioexport.encode()` consumes an **existing file**, whereas `readio/wave.py` currently also supports **PCM streaming**. An intermediate temporary WAV adapter can work but should be isolated/tested, not silently forced on the live path.
 7. Run the existing Readio format, export, audiobook, CLI, API and project-state test suites. On parity, enable the flag progressively, then deprecate the redundant encoding implementation in a later PR. Rollback = feature flag off; never delete last-good artifacts.
 
-## Bridge shape (illustrative, not a drop-in patch)
+## Profile-based bridge shape (illustrative, not a drop-in patch)
 
 ```python
-# Inside the existing Readio export operation, while the project lock is held,
-# after its existing target ownership / provenance checks:
-from audioexport import encode
+from pathlib import Path
+from audioexport import encode, load_profile, preflight_profile
 
-result = encode(
-    master, target, format=audio_format,
-    bitrate=bitrate, force=replace_existing,
+# Load the profile once, then prove all configured outputs are encodable before writing.
+profile = load_profile(profile_path)
+resolved_outputs = preflight_profile(
+    profile,
+    master,
+    ffmpeg=ffmpeg,
+    ffprobe=ffprobe,
 )
-# Readio keeps storing its OWN export state/manifest and returning its OWN API result.
-# The new audioexport sidecar is additional, not a replacement for Readio state.
+
+for resolved in resolved_outputs:
+    target = Path(readio_destination) / resolved.filename
+
+    # Readio-owned checks happen after read-only preflight and before encode:
+    # freshness, project lock, destination collision/ownership, provenance,
+    # overwrite authorization, and state policy.
+    result = encode(
+        master,
+        target,
+        format=resolved.format,
+        bitrate=resolved.bitrate,
+        metadata=profile.metadata,
+        cover=resolved.cover,
+        timeline=resolved.timeline,
+        force=readio_authorized_replace,
+        ffmpeg=ffmpeg,
+        ffprobe=ffprobe,
+    )
+
+    # Readio stores its own state/index/result after each successful encode.
 ```
+
+`preflight_profile()` never takes an output directory or chooses a target. It validates the complete loaded profile without creating audio, manifests, temporary files, or directories. A caller can instead call `resolve_output(profile, spec, source_stem)` when it only needs one selected output's effective settings; it still must run the appropriate Readio checks before writing.
 
 **Important nuance:** For `readio export` with a tracked file that has changed inputs, using a new sidecar for the first time means the target appears untracked to audioexport. While bridging, Readio must explicitly authorize replace by passing `force=True` **only after Readio's own ownership check**; this applies even when its existing `force` flag was false. Never broaden replacement for arbitrary external targets.
 

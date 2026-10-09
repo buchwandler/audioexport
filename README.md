@@ -205,6 +205,44 @@ When a selector is omitted (`None`), configured global artwork is attached autom
 
 `run_profile()` validates every row, resource, capability, and concrete filename collision before the first encode, then returns results in TOML order. Resource paths are relative to the profile file. Explicit `filename` values are literal simple filenames with the matching extension; no template expansion or nested paths are supported. If omitted, each filename uses the input stem. Profile-wide metadata is inherited by every output; there is no per-output metadata override.
 
+## Profile resolution and read-only preflight API
+
+The `audioexport.profile.v1` `use_cover` and `use_chapters` fields select profile-wide resources for each output. An omitted selector (`None`) uses a configured resource only when the format supports it; `false` suppresses it; `true` requires both a configured resource and a supporting format. Automatic selection is:
+
+| Formats              | Cover by default   | Chapters by default |
+| -------------------- | ------------------ | ------------------- |
+| WAV, FLAC, OGG, Opus | No                 | No                  |
+| MP3                  | Yes, if configured | No                  |
+| M4A, M4B             | Yes, if configured | Yes, if configured  |
+
+`ResolvedOutput` is an immutable description containing normalized format, literal filename, effective normalized bitrate, and selected cover/timeline paths. Explicit filenames are simple filenames with a matching extension and are never interpolated; only an omitted filename uses the supplied source stem. `resolve_output(profile, spec, source_stem)` is a pure operation on an already-loaded profile and does not probe media or read the TOML again.
+
+Use `preflight_profile()` when the complete profile must be proven ready before the first output write. It returns the resolved outputs in TOML order, checks the source, metadata, selected resources and chapters, FFmpeg/FFprobe, and only the requested encoders. It does not accept an output directory and creates no outputs, directories, manifests, or temporary files. An unused global resource (for example, a missing cover on a FLAC-only profile) is not validated.
+
+```python
+from pathlib import Path
+from audioexport import encode, load_profile, preflight_profile
+
+source = Path("master.wav")
+profile = load_profile("export.toml")  # Load once.
+resolved_outputs = preflight_profile(profile, source)
+
+for resolved in resolved_outputs:
+    target = Path("exports") / resolved.filename
+    # A consumer such as Readio performs its target/ownership/overwrite checks here.
+    result = encode(
+        source,
+        target,
+        format=resolved.format,
+        bitrate=resolved.bitrate,
+        metadata=profile.metadata,
+        cover=resolved.cover,
+        timeline=resolved.timeline,
+    )
+```
+
+A consumer may instead call `resolve_output()` for a single selected spec; use full-profile preflight when the operation requires every configured output validated. Preflight is not an ownership authorization: Readio remains responsible for project locks and freshness, destination selection and collision/ownership checks, overwrite authorization, state/index updates, result types, and partial-batch bookkeeping. Call `encode()` only after those consumer-owned checks pass. `ResolvedOutput`, `resolve_output`, and `preflight_profile` are available from both `audioexport` and `audioexport.api`.
+
 ## Chapters/timeline
 
 Use an independent JSON file such as [`examples/chapters.json`](examples/chapters.json):

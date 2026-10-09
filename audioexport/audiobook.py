@@ -27,14 +27,14 @@ from .metadata import AudiobookMetadata, audiobook_tags
 from .pipeline import (
     _canonical_hash,
     _commit_export,
-    _cover_kind,
-    _duration_ms,
     _manifest_path,
     _output_lock,
     _producer_version,
     _verify_output,
     sha256_file,
 )
+from .validation import cover_kind as _cover_kind
+from .validation import duration_ms as _duration_ms
 
 
 @dataclass(frozen=True, slots=True)

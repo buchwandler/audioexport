@@ -43,51 +43,102 @@ class ResolvedOutput:
     timeline: Path | None
 
 
-_COVER_FORMATS = frozenset({"mp3", "m4a", "m4b"})
-_CHAPTER_FORMATS = frozenset({"m4a", "m4b"})
+COVER_FORMATS = frozenset({"mp3", "m4a", "m4b"})
+CHAPTER_FORMATS = frozenset({"m4a", "m4b"})
+
+
+def _validate_filename(filename: object, fmt: str) -> str:
+    if (
+        not isinstance(filename, str)
+        or not filename
+        or filename in {".", ".."}
+        or "\x00" in filename
+        or Path(filename).name != filename
+        or PureWindowsPath(filename).name != filename
+        or Path(filename).suffix.lower() != FORMATS[fmt].extension
+    ):
+        raise InvalidExportError(
+            "output filename must be a simple name with matching extension",
+            code="audioexport.profile_invalid",
+        )
+    return filename
 
 
 def resolve_output(profile: ExportProfile, spec: OutputSpec, source_stem: str) -> ResolvedOutput:
-    """Resolve profile-wide resources using per-format defaults and explicit selectors."""
+    """Resolve one output's filename, bitrate, and selected profile resources.
+
+    This is a pure operation over an already-loaded profile. It does not check
+    resource contents or touch the filesystem.
+    """
+    if not isinstance(spec, OutputSpec):
+        raise InvalidExportError("output spec is invalid", code="audioexport.profile_invalid")
+    if not isinstance(spec.format, str):
+        raise InvalidExportError(
+            "output format must be a string", code="audioexport.profile_invalid"
+        )
+    fmt = normalize_format(spec.format)
+    if (
+        not isinstance(source_stem, str)
+        or not source_stem
+        or source_stem in {".", ".."}
+        or "\x00" in source_stem
+        or Path(source_stem).name != source_stem
+        or PureWindowsPath(source_stem).name != source_stem
+    ):
+        raise InvalidExportError(
+            "source stem must be a simple non-empty name", code="audioexport.profile_invalid"
+        )
+    if spec.filename is None:
+        filename = f"{source_stem}{FORMATS[fmt].extension}"
+    else:
+        filename = _validate_filename(spec.filename, fmt)
+    if spec.bitrate is not None and (
+        isinstance(spec.bitrate, bool) or not isinstance(spec.bitrate, (str, int))
+    ):
+        raise InvalidExportError(
+            "bitrate must be an integer or string", code="audioexport.profile_invalid"
+        )
+    bitrate = normalize_bitrate(spec.bitrate, fmt)
+    for field, value in (("use_cover", spec.use_cover), ("use_chapters", spec.use_chapters)):
+        if value is not None and not isinstance(value, bool):
+            raise InvalidExportError(
+                f"{field} must be a boolean", code="audioexport.profile_invalid"
+            )
+
+    if spec.use_cover is True and fmt not in COVER_FORMATS:
+        raise InvalidExportError(
+            f"cover art is unsupported for {fmt}", code="audioexport.cover_unsupported"
+        )
     if spec.use_cover is True and profile.cover is None:
         raise InvalidExportError(
-            "use_cover=true requires a profile cover", code="audioexport.profile_invalid"
+            "use_cover=true requires a profile cover", code="audioexport.cover_required"
+        )
+    if spec.use_chapters is True and fmt not in CHAPTER_FORMATS:
+        raise InvalidExportError(
+            f"chapters are unsupported for {fmt}", code="audioexport.chapters_unsupported"
         )
     if spec.use_chapters is True and profile.timeline is None:
         raise InvalidExportError(
-            "use_chapters=true requires a profile timeline", code="audioexport.profile_invalid"
+            "use_chapters=true requires a profile timeline", code="audioexport.chapters_required"
         )
-    if spec.use_cover is True and spec.format not in _COVER_FORMATS:
+
+    use_cover = spec.use_cover is True or (
+        spec.use_cover is None and profile.cover is not None and fmt in COVER_FORMATS
+    )
+    use_chapters = spec.use_chapters is True or (
+        spec.use_chapters is None and profile.timeline is not None and fmt in CHAPTER_FORMATS
+    )
+    cover = profile.cover if use_cover else None
+    timeline = profile.timeline if use_chapters else None
+    if cover is not None and not isinstance(cover, Path):
         raise InvalidExportError(
-            f"cover art is unsupported for {spec.format}", code="audioexport.profile_invalid"
+            "profile cover must be a resolved path", code="audioexport.profile_invalid"
         )
-    if spec.use_chapters is True and spec.format not in _CHAPTER_FORMATS:
+    if timeline is not None and not isinstance(timeline, Path):
         raise InvalidExportError(
-            f"chapters are unsupported for {spec.format}", code="audioexport.profile_invalid"
+            "profile timeline must be a resolved path", code="audioexport.profile_invalid"
         )
-    cover = (
-        profile.cover
-        if spec.use_cover is True
-        or (spec.use_cover is None and profile.cover is not None and spec.format in _COVER_FORMATS)
-        else None
-    )
-    timeline = (
-        profile.timeline
-        if spec.use_chapters is True
-        or (
-            spec.use_chapters is None
-            and profile.timeline is not None
-            and spec.format in _CHAPTER_FORMATS
-        )
-        else None
-    )
-    return ResolvedOutput(
-        format=spec.format,
-        filename=spec.filename or f"{source_stem}{FORMATS[spec.format].extension}",
-        bitrate=spec.bitrate,
-        cover=cover,
-        timeline=timeline,
-    )
+    return ResolvedOutput(fmt, filename, bitrate, cover, timeline)
 
 
 def _relative_resource(value: Any, root: Path, field: str) -> Path | None:
@@ -182,14 +233,6 @@ def load_profile(path: str | Path) -> ExportProfile:
             raise InvalidExportError(
                 "use_chapters must be a boolean", code="audioexport.profile_invalid"
             )
-        if use_cover is True and raw.get("cover") is None:
-            raise InvalidExportError(
-                "use_cover=true requires a profile cover", code="audioexport.profile_invalid"
-            )
-        if use_chapters is True and raw.get("timeline") is None:
-            raise InvalidExportError(
-                "use_chapters=true requires a profile timeline", code="audioexport.profile_invalid"
-            )
         # Validate eagerly. Keep None so default is chosen by encode().
         if bitrate is not None:
             normalize_bitrate(bitrate, fmt)
@@ -204,9 +247,5 @@ def load_profile(path: str | Path) -> ExportProfile:
         )
     cover = _relative_resource(raw.get("cover"), path.parent, "cover")
     timeline = _relative_resource(raw.get("timeline"), path.parent, "timeline")
-    for field, resource in (("cover", cover), ("timeline", timeline)):
-        if resource is not None and not resource.is_file():
-            raise InvalidExportError(
-                f"{field} must be an existing file", code="audioexport.profile_invalid"
-            )
+    # Resource existence and content are checked only when a resolved output selects them.
     return ExportProfile(tuple(specifications), metadata, cover, timeline)

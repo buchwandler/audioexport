@@ -121,7 +121,9 @@ def test_profile_preflight_detects_default_and_explicit_name_collision(
     assert not out.exists()
 
 
-def test_profile_rejects_non_boolean_selectors_and_missing_resources(tmp_path: Path) -> None:
+def test_profile_rejects_non_boolean_selectors_but_defers_missing_resources(
+    tmp_path: Path,
+) -> None:
     non_boolean = tmp_path / "bad-selector.toml"
     non_boolean.write_text(
         'schema = "audioexport.profile.v1"\n[[outputs]]\nformat = "mp3"\nuse_cover = "yes"\n',
@@ -135,8 +137,9 @@ def test_profile_rejects_non_boolean_selectors_and_missing_resources(tmp_path: P
         'schema = "audioexport.profile.v1"\ncover = "absent.jpg"\n[[outputs]]\nformat = "mp3"\n',
         encoding="utf-8",
     )
-    with pytest.raises(InvalidExportError, match="existing file"):
-        load_profile(missing)
+    profile = load_profile(missing)
+    assert profile.cover == (tmp_path / "absent.jpg").resolve()
+    assert resolve_output(profile, profile.outputs[0], "book").cover == profile.cover
 
 
 def test_profile_cache_identity_tracks_only_consumed_resources(
@@ -147,40 +150,68 @@ def test_profile_cache_identity_tracks_only_consumed_resources(
     _write_cover(cover)
     _timeline(timeline)
     profile = tmp_path / "cache.toml"
+    formats = ("wav", "flac", "mp3", "m4a", "m4b", "ogg", "opus")
 
     def set_profile(*, bitrate: str = "128k", title: str = "Book") -> None:
+        outputs = []
+        for fmt in formats:
+            options = f'bitrate = "{bitrate}"\n' if fmt == "mp3" else ""
+            outputs.append(f"[[outputs]]\nformat = {fmt!r}\n{options}")
         profile.write_text(
             'schema = "audioexport.profile.v1"\n'
             'cover = "cover.jpg"\n'
             'timeline = "chapters.json"\n'
-            f'[metadata]\ntitle = "{title}"\n'
-            '[[outputs]]\nformat = "mp3"\n'
-            f'bitrate = "{bitrate}"\nuse_chapters = false\n'
-            '[[outputs]]\nformat = "m4b"\n',
+            f'[metadata]\ntitle = "{title}"\n' + "".join(outputs),
             encoding="utf-8",
         )
 
+    out = tmp_path / "out"
     set_profile()
-    initial = run_profile(wav, profile, tmp_path / "out")
-    repeated = run_profile(wav, profile, tmp_path / "out")
-    assert [result.reused for result in repeated] == [True, True]
+    initial = run_profile(wav, profile, out)
+    repeated = run_profile(wav, profile, out)
+    assert [result.format for result in initial] == list(formats)
+    assert [result.reused for result in repeated] == [True] * len(formats)
     assert [result.export_id for result in repeated] == [result.export_id for result in initial]
 
     _timeline(timeline, "Changed chapter")
-    timeline_changed = run_profile(wav, profile, tmp_path / "out")
-    assert [result.reused for result in timeline_changed] == [True, False]
+    timeline_changed = run_profile(wav, profile, out)
+    assert [result.reused for result in timeline_changed] == [
+        True,
+        True,
+        True,
+        False,
+        False,
+        True,
+        True,
+    ]
 
     set_profile(bitrate="192k")
-    bitrate_changed = run_profile(wav, profile, tmp_path / "out")
-    assert [result.reused for result in bitrate_changed] == [False, True]
+    bitrate_changed = run_profile(wav, profile, out)
+    assert [result.reused for result in bitrate_changed] == [
+        True,
+        True,
+        False,
+        True,
+        True,
+        True,
+        True,
+    ]
 
     _write_cover(cover, "blue")
-    cover_changed = run_profile(wav, profile, tmp_path / "out")
-    assert [result.reused for result in cover_changed] == [False, False]
+    cover_changed = run_profile(wav, profile, out)
+    assert [result.reused for result in cover_changed] == [
+        True,
+        True,
+        False,
+        False,
+        False,
+        True,
+        True,
+    ]
 
-    set_profile(title="Updated Book")
-    metadata_changed = run_profile(wav, profile, tmp_path / "out")
-    assert [result.reused for result in metadata_changed] == [False, False]
+    set_profile(bitrate="192k", title="Updated Book")
+    metadata_changed = run_profile(wav, profile, out)
+    assert [result.reused for result in metadata_changed] == [False] * len(formats)
 
 
 def test_direct_encode_keeps_unsupported_timeline_strict(tmp_path: Path, wav: Path) -> None:

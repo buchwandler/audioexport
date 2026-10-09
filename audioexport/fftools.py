@@ -169,16 +169,20 @@ def probe(path: Path | str, ffprobe: str | Path | None = None) -> dict[str, Any]
     return _validate_probe_payload(payload)
 
 
+def _parse_encoder_names(text: str) -> frozenset[str]:
+    return frozenset(fields[1] for line in text.splitlines() if len(fields := line.split()) >= 2)
+
+
+def available_encoders(ffmpeg_exe: str | Path) -> frozenset[str]:
+    """Return encoder names reported by one FFmpeg capability query."""
+    result = run([str(ffmpeg_exe), "-hide_banner", "-encoders"])
+    return _parse_encoder_names(result.stdout + "\n" + result.stderr)
+
+
 def encoder_for_format(fmt: str, ffmpeg: str | Path | None = None) -> str:
     """Return the preferred available encoder for a format."""
     normalized = normalize_format(fmt)
-    exe = executable("ffmpeg", ffmpeg)
-    result = run([exe, "-hide_banner", "-encoders"])
-    encoder_names = {
-        fields[1]
-        for line in (result.stdout + "\n" + result.stderr).splitlines()
-        if len(fields := line.split()) >= 2
-    }
+    encoder_names = available_encoders(executable("ffmpeg", ffmpeg))
     spec = FORMATS[normalized]
     selected = next(
         (
@@ -218,12 +222,12 @@ def doctor(
             tools[name] = {"available": False, "error": str(exc)}
     ff = tools["ffmpeg"]
     supported: dict[str, Any] = {}
-    encoder_text = ""
+    encoder_names: frozenset[str] = frozenset()
     encoder_error: str | None = None
     if ff["available"]:
         try:
             result = run([ff["path"], "-hide_banner", "-encoders"])
-            encoder_text = result.stdout + "\n" + result.stderr
+            encoder_names = _parse_encoder_names(result.stdout + "\n" + result.stderr)
         except EncodingError as exc:
             encoder_error = str(exc)
     else:
@@ -232,9 +236,6 @@ def doctor(
         available: bool | None = None
         reason: str | None = None
         if encoder_error is None:
-            encoder_names = {
-                fields[1] for line in encoder_text.splitlines() if len(fields := line.split()) >= 2
-            }
             selected = next(
                 (
                     candidate
@@ -271,7 +272,7 @@ def doctor(
     ffprobe_available = tools["ffprobe"]["available"] is True
     ffmpeg_available = tools["ffmpeg"]["available"] is True
     aac_available = supported["m4b"]["available"] is True
-    features = {
+    features: dict[str, dict[str, Any]] = {
         "m4b_encode": {
             "available": ffmpeg_available and ffprobe_available and aac_available,
             "requires": ["ffmpeg", "ffprobe", "aac"],

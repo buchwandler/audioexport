@@ -123,6 +123,7 @@ def test_doctor_uses_native_vorbis_when_libvorbis_is_missing(
 def test_profile_encoder_failure_is_preflighted_before_output(
     tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    import audioexport.preflight as preflight_module
     from audioexport import pipeline
 
     profile = tmp_path / "needs-opus.toml"
@@ -132,26 +133,28 @@ def test_profile_encoder_failure_is_preflighted_before_output(
         '[[outputs]]\nformat = "opus"\n',
         encoding="utf-8",
     )
-    formats = {
-        name: {"available": name != "opus", "reason": "libopus is missing"}
-        for name in ("wav", "flac", "mp3", "m4a", "m4b", "ogg", "opus")
-    }
     monkeypatch.setattr(
-        pipeline,
-        "fftool_doctor",
-        lambda **kwargs: {
-            "tools": {
-                "ffmpeg": {"available": True},
-                "ffprobe": {"available": True},
-            },
-            "formats": formats,
-            "requested_formats_ready": False,
+        preflight_module,
+        "executable",
+        lambda name, provided=None: f"/tools/{name}",
+    )
+    monkeypatch.setattr(
+        preflight_module,
+        "probe",
+        lambda source, ffprobe: {
+            "streams": [{"codec_type": "audio", "duration": "2.0"}],
+            "format": {"duration": "2.0"},
         },
+    )
+    monkeypatch.setattr(
+        preflight_module,
+        "available_encoders",
+        lambda ffmpeg: frozenset({"pcm_s16le"}),
     )
     out = tmp_path / "out"
 
     with pytest.raises(EncodingError) as error:
         pipeline.run_profile(wav, profile, out)
 
-    assert error.value.code == "audioexport.encoder_unavailable"
+    assert error.value.code == "audioexport.encoder_missing"
     assert not out.exists()

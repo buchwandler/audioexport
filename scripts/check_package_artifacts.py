@@ -25,6 +25,8 @@ REQUIRED_MODULES = {
     "formats.py",
     "pipeline.py",
     "profile.py",
+    "preflight.py",
+    "validation.py",
 }
 FORBIDDEN_RUNTIME_DEPENDENCIES = {
     "audiocompose",
@@ -166,13 +168,21 @@ def _smoke_install(wheel: Path, version: str, source_root: Path) -> None:
             "import importlib.metadata as metadata; "
             "import importlib.resources as resources; "
             "from pathlib import Path; import sys; import audioexport; "
-            "from audioexport import encode, run_profile, load_profile, probe, doctor; "
+            "from audioexport import ResolvedOutput, resolve_output, preflight_profile, "
+            "encode, run_profile, load_profile, probe, doctor; "
+            "from audioexport.api import ResolvedOutput as ApiResolvedOutput, "
+            "resolve_output as api_resolve_output, "
+            "preflight_profile as api_preflight_profile; "
+            "assert ResolvedOutput is ApiResolvedOutput and "
+            "resolve_output is api_resolve_output and "
+            "preflight_profile is api_preflight_profile; "
             f"assert audioexport.__version__ == metadata.version('audioexport') == {version!r}; "
             "assert resources.files('audioexport').joinpath('py.typed').is_file(); "
             f"assert not Path(audioexport.__file__).resolve().is_relative_to(Path({str(source_root)!r})); "
             "assert not any(name in sys.modules for name in "
             "('readio', 'audiocompose', 'utterplan', 'voicerender', 'soundfile', 'numpy')); "
-            "assert all(callable(item) for item in (encode, run_profile, load_profile, probe, doctor))"
+            "assert all(callable(item) for item in (ResolvedOutput, resolve_output, "
+            "preflight_profile, encode, run_profile, load_profile, probe, doctor))"
         )
         result = _run([str(python), "-c", smoke], cwd=temp_root)
         if result.returncode:
