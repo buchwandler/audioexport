@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -157,3 +158,68 @@ def ffmetadata_text(chapters: Sequence[Chapter]) -> str:
             )
         )
     return "\n".join(lines)
+
+
+_CHAPTERS_TXT_LINE = re.compile(r"^(\d{2,}):([0-5]\d):([0-5]\d)\.(\d{3})\s+(.+)$")
+
+
+def load_chapters_txt(path: Path | str) -> tuple[Chapter, ...]:
+    """Load timestamp/title rows from a UTF-8 chapters.txt file."""
+    source = Path(path)
+    try:
+        text = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise InvalidExportError(
+            f"invalid chapters file {source}: {exc}", code="audioexport.chapters_invalid"
+        ) from exc
+
+    chapters: list[Chapter] = []
+    previous_start = -1
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = _CHAPTERS_TXT_LINE.fullmatch(line)
+        if match is None:
+            raise InvalidExportError(
+                f"invalid chapters.txt line {line_number}", code="audioexport.chapters_invalid"
+            )
+        hours, minutes, seconds, milliseconds, raw_title = match.groups()
+        start_ms = ((int(hours) * 60 + int(minutes)) * 60 + int(seconds)) * 1000 + int(milliseconds)
+        title = raw_title.strip()
+        if not title or start_ms <= previous_start:
+            raise InvalidExportError(
+                f"chapters.txt line {line_number} has an empty title or non-monotonic timestamp",
+                code="audioexport.chapters_invalid",
+            )
+        chapters.append(Chapter(title, start_ms))
+        previous_start = start_ms
+    if not chapters:
+        raise InvalidExportError(
+            "chapters.txt contains no chapter entries", code="audioexport.chapters_invalid"
+        )
+    return tuple(chapters)
+
+
+def build_track_chapters(rows: Sequence[tuple[str, int]]) -> tuple[Chapter, ...]:
+    """Build one chapter per (title, normalized duration_ms) pair."""
+    if not rows:
+        raise InvalidExportError(
+            "cannot build chapters without tracks", code="audioexport.chapters_invalid"
+        )
+    chapters: list[Chapter] = []
+    offset_ms = 0
+    for title, duration_ms in rows:
+        if (
+            not isinstance(title, str)
+            or not title.strip()
+            or isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, int)
+            or duration_ms <= 0
+        ):
+            raise InvalidExportError(
+                "track chapter title and duration are invalid", code="audioexport.chapters_invalid"
+            )
+        chapters.append(Chapter(title.strip(), offset_ms))
+        offset_ms += duration_ms
+    return tuple(chapters)

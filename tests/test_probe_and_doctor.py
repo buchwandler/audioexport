@@ -96,7 +96,10 @@ def test_doctor_reports_missing_encoder_and_selected_readiness(
     assert "libopus" in result["formats"]["opus"]["reason"]
     assert result["formats"]["mp3"]["available"] is True
     assert Path(result["tools"]["ffmpeg"]["path"]).name == "ffmpeg"
+    assert result["features"]["m4b_audiobook"]["available"] is True
+    assert result["features"]["m4b_stream_copy"]["available"] is True
     assert result["package"]["name"] == "audioexport"
+
     assert result["package"]["version"]
 
 

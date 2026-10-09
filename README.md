@@ -2,7 +2,7 @@
 
 An independent Python library and command-line interface for exporting audio through **FFmpeg**. This is the first extraction step from Readio's output/encoding subsystem, but **audioexport does not import or install Readio, AudioCompose, UtterPlan, or synthesis engines**.
 
-Supported formats: WAV (PCM16), FLAC, MP3, M4A (AAC), M4B (AAC audiobook), OGG (Vorbis), and Opus. Handles tagged metadata, embedded JPEG/PNG cover art for MP3/M4A/M4B, JSON chapter timelines for M4A/M4B, FFprobe verification, artifact identities and safe reuse.
+Supported formats: WAV (PCM16), FLAC, MP3, M4A (AAC), M4B (AAC audiobook), OGG (Vorbis), and Opus. Handles tagged metadata, embedded JPEG/PNG cover art for MP3/M4A/M4B, JSON chapter timelines for M4A/M4B, standalone ordered multi-track audiobook assembly, FFprobe verification, artifact identities and safe reuse.
 
 ## Install
 
@@ -22,7 +22,7 @@ python -m pip install -e .
 audioexport doctor --json
 ```
 
-`doctor` reports package/tool versions and encoder availability per format. Its existing `ready` key means FFmpeg and FFprobe are present; `all_formats_ready` and each `formats` entry report encoder capability and a reason when unavailable. `run_profile()` checks the encoders selected by the profile before writing outputs.
+`doctor` reports package/tool versions and encoder availability per format. Its existing `ready` key means FFmpeg and FFprobe are present; `all_formats_ready` and each `formats` entry report encoder capability and a reason when unavailable. The additive `features` entries report `m4b_encode`, `m4b_audiobook`, and `m4b_stream_copy` availability; missing optional capabilities do not make `ready` false. `run_profile()` checks the encoders selected by the profile before writing outputs.
 
 The only base Python dependency is `tomli` on Python 3.10. FFmpeg/FFprobe are external executables; AudioExport does not install or import Readio, AudioCompose, UtterPlan, VoiceRender, soundfile, or NumPy.
 
@@ -49,6 +49,72 @@ audioexport encode demo.wav --format m4b -o mybook.m4b \
 # Export multiple formats at once using an editable profile:
 audioexport run demo.wav --profile examples/export.toml --out-dir exported/ --json
 ```
+
+## Standalone audiobook assembly
+
+`encode` converts one already-prepared audio source to a format; it does not merge a collection of source tracks. Use the separate `audiobook` workflow when starting from ordered tracks or a directory:
+
+```bash
+# Direct directory input: immediate audio files only, natural filename ordering.
+audioexport audiobook book-tracks/ -o book.m4b \
+  --title "My Book" --author "Author Name" --album "My Book" --cover cover.jpg
+
+# Or provide an explicit order; source title tags become chapter titles when present.
+audioexport audiobook 01-intro.mp3 02-chapter-one.flac 03-chapter-two.wav \
+  -o book.m4b --bitrate 96k --language eng
+
+# Explicit chapter starts from chapters.txt or the existing JSON/Readio timeline format.
+audioexport audiobook book-tracks/ -o book.m4b --chapters-file chapters.txt
+```
+
+Each source track becomes one chapter by default. Chapter starts use normalized segment durations; titles prefer an explicit `AudiobookTrack` title, then the source title tag, then the filename stem. Tracks are serially normalized to common AAC settings, concatenated with stream copy, and final-muxed without a second audio encode. Sample rate and channel count default from the first track; only mono/stereo targets are supported. The audiobook command defaults to the FFmpeg-compatible `media_type=2` tag. `--author` (or its `--artist` alias) writes the player-compatible `artist` tag; `--album-artist`, `--writer`, and `--long-description` map to `album_artist`, `composer`, and `synopsis`. `--metadata KEY=VALUE` adds or overrides an FFmpeg tag.
+
+For one directory input, the CLI discovers `cover.jpg`, then `cover.jpeg`, then `cover.png`, plus `chapters.txt`, when explicit resources were not supplied. Discovered names appear in command output and the audiobook manifest. Use `--no-auto-sidecars` to disable this behavior. The library API does not scan sibling files unless called with `discover_sidecars=True`.
+
+Python callers can use the same assembly workflow without invoking the CLI:
+
+```python
+from audioexport import AudiobookMetadata, AudiobookTrack, build_audiobook
+
+result = build_audiobook(
+    [
+        AudiobookTrack("01-intro.mp3", title="Introduction"),
+        "02-chapter-one.flac",
+    ],
+    "book.m4b",
+    metadata=AudiobookMetadata(title="My Book", author="Author Name"),
+    cover="cover.jpg",
+)
+print(result.track_count, result.chapter_count, result.reused)
+```
+
+A separate `audioexport.audiobook.v1` profile describes ordered inputs and explicit resources. All relative paths resolve from the profile file; no glob or implicit directory expansion is used in TOML. `chapters_file` is a top-level resource path, while `[chapters]` selects its mode:
+
+```toml
+schema = "audioexport.audiobook.v1"
+output = "My Book.m4b"
+inputs = ["01 Intro.mp3", "02 Chapter One.flac"]
+cover = "cover.jpg"
+chapters_file = "chapters.txt"
+
+[audio]
+bitrate = "96k"
+sample_rate = 44100
+channels = 2
+
+[metadata]
+title = "My Book"
+author = "Author Name"
+album = "My Book"
+genre = "Audiobook"
+language = "eng"
+
+[chapters]
+mode = "explicit"       # tracks | explicit | none
+# title_source = "tag"  # tag (falls back to filename) | filename
+```
+
+Run it with `audioexport audiobook --profile audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file` override profile values; the TOML input order remains authoritative. `mode = "tracks"` (the default) creates one chapter per track; `mode = "explicit"` requires `chapters_file`; `mode = "none"` disables chapters. Existing `encode(..., format="m4b", timeline=...)` remains the right choice for Readio's prepared master and project timeline.
 
 If `--output` is not set for `encode`, the output filename defaults to the input stem and chosen format. To avoid destroying the input, encoding input and output to the same real path is always rejected.
 
@@ -87,7 +153,7 @@ print(probe("exported/book.m4b")["chapters"])
 
 You may import the same public functions from `audioexport.api` as well as from `audioexport`.
 
-The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult` containing the identity, path, checksum, and reuse state. Both `encode` and `run_profile` work without a Readio project.
+The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult`; `build_audiobook()` returns an `AudiobookResult` with track/chapter counts and verified duration. Both APIs include identity, path, checksum, and reuse state, and work without a Readio project.
 
 ## Export profile
 
@@ -158,7 +224,7 @@ For an incremental Readio migration, the same `--timeline` API also reads **Read
 
 ## Integrity and versioning
 
-Each completed output has a sibling sidecar, for example `output.mp3.audioexport.json`, holding `audioexport.manifest.v1`, a SHA-256 export identity, the source/output and consumed-resource digests, FFmpeg/FFprobe versions, normalized options, chapter mapping, and probed output summary. The identity is **input-content + relevant options/resources + tools**, not output location or TOML formatting. A bitrate change affects only that output; a timeline change affects only chapter-consuming outputs; changing shared metadata affects all outputs that inherit it. The original source is never modified.
+`encode()` and `run_profile()` outputs have a sibling sidecar, for example `output.mp3.audioexport.json`, holding `audioexport.manifest.v1`, a SHA-256 export identity, source/output and consumed-resource digests, tool versions, normalized options, chapter mapping, and the probed output summary. `build_audiobook()` uses the same sidecar path with `audioexport.audiobook-manifest.v1`, recording ordered tracks, consumed resources, normalized settings, resolved chapter structure, tools, and verification. Generic export identity is **input-content + relevant options/resources + tools**, not output location or TOML formatting. The original sources are never modified.
 
 Encoding uses argument-vector subprocess calls (`shell=False`) and stages both audio and manifest before committing. The output lock serializes same-target writers across processes; a competing call receives a typed busy error. If a sidecar commit fails, the previous output/manifest are restored when possible. A recovery failure retains its backup and refuses to treat a mismatched sidecar as current; inspect the reported recovery path before retrying. FFprobe validation checks the single audio stream, codec, duration, requested tags/chapters, and cover codec/disposition.
 
@@ -185,7 +251,7 @@ python scripts/check_package_artifacts.py
 audioexport doctor --json
 ```
 
-Tests cover seven real formats in one profile, selective cache invalidation, M4A/M4B chapters and covers, Readio sample timelines, malformed probes, encoder availability, transactional failure recovery, no-clobber behavior, and concurrent writers. CI runs Python 3.10 and 3.13 on Linux, Windows, and macOS, and checks lint, formatting, typing, build metadata, Twine, package contents, and an isolated wheel install outside the checkout. Cross-platform encoder availability still depends on the FFmpeg build installed by the runner.
+Tests cover seven real formats in one profile, mixed-format audiobook assembly, 100-track ordering/chapters, audiobook cache invalidation, M4A/M4B chapters and covers, Readio sample timelines, malformed probes, encoder availability, transactional failure recovery, no-clobber behavior, and concurrent writers. CI runs Python 3.10 and 3.13 on Linux, Windows, and macOS, and checks lint, formatting, typing, build metadata, Twine, package contents, and an isolated wheel install outside the checkout. Cross-platform encoder availability still depends on the FFmpeg build installed by the runner.
 
 ## Limitations (MVP)
 

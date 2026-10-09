@@ -5,14 +5,17 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .audiobook import build_audiobook
+from .audiobook_profile import load_audiobook_profile, resolve_profile_overrides
 from .errors import AudioExportError
 from .fftools import doctor, probe
 from .formats import FORMATS
+from .metadata import AudiobookMetadata
 from .pipeline import encode, run_profile
 
 
@@ -51,6 +54,38 @@ def _parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--ffmpeg")
     run_parser.add_argument("--ffprobe")
 
+    audiobook = sub.add_parser(
+        "audiobook", help="Assemble ordered tracks or a directory into one audiobook M4B"
+    )
+    audiobook.add_argument("inputs", type=Path, nargs="*")
+    audiobook.add_argument("-o", "--output", type=Path)
+    audiobook.add_argument("--profile", type=Path)
+    audiobook.add_argument("--bitrate")
+    audiobook.add_argument("--sample-rate", type=int)
+    audiobook.add_argument("--channels", type=int, choices=(1, 2))
+    audiobook.add_argument("--title")
+    audiobook.add_argument("--author", "--artist", dest="author")
+    audiobook.add_argument("--album")
+    audiobook.add_argument("--album-artist")
+    audiobook.add_argument("--writer")
+    audiobook.add_argument("--genre")
+    audiobook.add_argument("--description")
+    audiobook.add_argument("--long-description")
+    audiobook.add_argument("--comment")
+    audiobook.add_argument("--copyright")
+    audiobook.add_argument("--encoded-by")
+    audiobook.add_argument("--language")
+    audiobook.add_argument("--publisher")
+    audiobook.add_argument("--grouping")
+    audiobook.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
+    audiobook.add_argument("--cover", type=Path)
+    audiobook.add_argument("--chapters-file", type=Path)
+    audiobook.add_argument("--use-filenames-as-chapters", action="store_true")
+    audiobook.add_argument("--no-auto-sidecars", action="store_true")
+    audiobook.add_argument("--force", action="store_true")
+    audiobook.add_argument("--json", action="store_true")
+    audiobook.add_argument("--ffmpeg")
+    audiobook.add_argument("--ffprobe")
     inspect = sub.add_parser("inspect", help="Inspect audio and audioexport sidecar")
     inspect.add_argument("input", type=Path)
     inspect.add_argument("--json", action="store_true")
@@ -126,6 +161,107 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ffprobe=args.ffprobe,
             )
             _print([item.to_dict() for item in results], as_json=args.json)
+            return 0
+        if args.command == "audiobook":
+            metadata_values: dict[str, str] = {}
+            for item in args.metadata:
+                if "=" not in item:
+                    raise AudioExportError(
+                        "--metadata requires KEY=VALUE",
+                        code="audioexport.audiobook_metadata_invalid",
+                    )
+                key, value = item.split("=", 1)
+                metadata_values[key] = value
+            for field in (
+                "title",
+                "author",
+                "album",
+                "album_artist",
+                "writer",
+                "genre",
+                "description",
+                "long_description",
+                "comment",
+                "copyright",
+                "encoded_by",
+                "language",
+                "publisher",
+                "grouping",
+            ):
+                value = getattr(args, field)
+                if value is not None:
+                    metadata_values[field] = value
+
+            audiobook_metadata: AudiobookMetadata | Mapping[str, str]
+            if args.profile is not None:
+                if args.inputs:
+                    raise AudioExportError(
+                        "positional inputs cannot be combined with --profile",
+                        code="audioexport.audiobook_profile_invalid",
+                    )
+                profile = load_audiobook_profile(args.profile)
+                profile = resolve_profile_overrides(
+                    profile,
+                    output=args.output,
+                    metadata=metadata_values,
+                    cover=args.cover,
+                    chapters_file=args.chapters_file,
+                    bitrate=args.bitrate,
+                    sample_rate=args.sample_rate,
+                    channels=args.channels,
+                    use_filenames_as_chapters=args.use_filenames_as_chapters,
+                )
+                inputs = profile.inputs
+                output = profile.output
+                audiobook_metadata = profile.metadata
+                cover = profile.cover
+                chapters_file = profile.chapters_file
+                chapters = () if profile.chapter_mode == "none" else None
+                use_filenames = profile.title_source == "filename"
+                discover_sidecars = False
+                audio_bitrate = profile.audio.bitrate
+                audio_sample_rate = profile.audio.sample_rate
+                audio_channels = profile.audio.channels
+            else:
+                if not args.inputs:
+                    raise AudioExportError(
+                        "audioexport audiobook requires at least one input",
+                        code="audioexport.audiobook_no_inputs",
+                    )
+                if args.output is None:
+                    raise AudioExportError(
+                        "audioexport audiobook requires --output unless --profile supplies it",
+                        code="audioexport.audiobook_output_invalid",
+                    )
+                inputs = args.inputs
+                output = args.output
+                audiobook_metadata = metadata_values
+                cover = args.cover
+                chapters_file = args.chapters_file
+                chapters = None
+                use_filenames = args.use_filenames_as_chapters
+                discover_sidecars = not args.no_auto_sidecars
+                audio_bitrate = args.bitrate
+                audio_sample_rate = args.sample_rate
+                audio_channels = args.channels
+
+            audiobook_result = build_audiobook(
+                inputs,
+                output,
+                metadata=audiobook_metadata,
+                cover=cover,
+                chapters=chapters,
+                chapters_file=chapters_file,
+                bitrate=audio_bitrate,
+                sample_rate=audio_sample_rate,
+                channels=audio_channels,
+                force=args.force,
+                ffmpeg=args.ffmpeg,
+                ffprobe=args.ffprobe,
+                discover_sidecars=discover_sidecars,
+                use_filenames_as_chapters=use_filenames,
+            )
+            _print(audiobook_result.to_dict(), as_json=args.json)
             return 0
     except (AudioExportError, OSError, FileExistsError, ValueError, KeyError) as exc:
         code = exc.code if isinstance(exc, AudioExportError) else "audioexport.error"

@@ -268,10 +268,31 @@ def doctor(
         package_version = distribution_version("audioexport")
     except PackageNotFoundError:
         package_version = "0+uninstalled"
+    ffprobe_available = tools["ffprobe"]["available"] is True
+    ffmpeg_available = tools["ffmpeg"]["available"] is True
+    aac_available = supported["m4b"]["available"] is True
+    features = {
+        "m4b_encode": {
+            "available": ffmpeg_available and ffprobe_available and aac_available,
+            "requires": ["ffmpeg", "ffprobe", "aac"],
+        },
+        "m4b_audiobook": {
+            "available": ffmpeg_available and ffprobe_available and aac_available,
+            "requires": ["ffmpeg", "ffprobe", "aac"],
+        },
+        "m4b_stream_copy": {
+            "available": ffmpeg_available and ffprobe_available,
+            "requires": ["ffmpeg", "ffprobe"],
+        },
+    }
+    for feature in features.values():
+        if not feature["available"]:
+            feature["reason"] = "one or more required tools or encoders are unavailable"
     return {
         "package": {"name": "audioexport", "version": package_version},
         "tools": tools,
         "formats": supported,
+        "features": features,
         "ready": all(x["available"] for x in tools.values()),
         "all_formats_ready": all_formats_ready,
         "requested_formats_ready": requested_formats_ready,
