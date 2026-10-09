@@ -1,0 +1,301 @@
+schema: documentledger.doc_record.v4
+doc_path: docs/readio-migration.md
+linked_sources:
+  - audioexport/chapters.py
+  - audioexport/fftools.py
+  - audioexport/pipeline.py
+  - audioexport/preflight.py
+  - audioexport/profile.py
+sections:
+  - section_id: md:section:docs/readio-migration.md::readio-audioexport-compatibility-first-extraction
+    doc_path: docs/readio-migration.md
+    heading_path:
+      - "Readio -> audioexport: compatibility-first extraction"
+    heading_slug: readio-audioexport-compatibility-first-extraction
+    line_span:
+      - 1
+      - 4
+    section_hash: 3ef57966cd6c9a48f0975a51d0eab8299eb79ea165359ca7a97d8f14061b3138
+    summary: "Readio -> audioexport: compatibility-first extraction"
+    text: "# Readio -> audioexport: compatibility-first extraction
+
+
+      **Reference inputs**: uploaded Readio Codecrate snapshot (2026-10-08) and `02_readio_modular_migration_roadmap.md`,
+      milestone 06. This is an **implementation guide**, not an applied Readio patch."
+    links: []
+  - section_id: md:section:docs/readio-migration.md::what-was-extracted-adapted
+    doc_path: docs/readio-migration.md
+    heading_path:
+      - "Readio -> audioexport: compatibility-first extraction"
+      - What was extracted/adapted
+    heading_slug: what-was-extracted-adapted
+    line_span:
+      - 5
+      - 15
+    section_hash: 85bacb47951b02bcdd9c380247d4c9668958d1eb0be34a7b5706942fdb3362e5
+    summary: What was extracted/adapted
+    text: "## What was extracted/adapted
+
+
+      | Readio source                                                                                    |
+      Independent implementation                                                             |
+      Kept in Readio for now                                                                                               |
+
+      | ------------------------------------------------------------------------------------------------
+      | --------------------------------------------------------------------------------------
+      | --------------------------------------------------------------------------------------------------------------------
+      |
+
+      | `readio/formats.py` format mappings + capability checks                                          |
+      `audioexport/formats.py`, `audioexport/fftools.py` explicit FFmpeg mapping, `doctor()`
+      | Readio's original public format detection and messages                                                               |
+
+      | `readio/wave.py` FFmpeg sink for M4A/Opus                                                        |
+      `audioexport/pipeline.py` file-to-file FFmpeg argv encoding, all codecs                |
+      Readio's streaming PCM sink and live `speak` path                                                                    |
+
+      | `readio/stages/export.py` bitrate normalization, export ID, output replacement                   |
+      `audioexport/formats.py` bitrate; `pipeline.py` own export identity and sidecars       |
+      `readio.export-state`, project lock, existing export identity and cache index                                        |
+
+      | `readio/stages/audiobook_export.py` metadata escaping, timeline chapters, M4B
+      command and checks | `audioexport/chapters.py`, `audioexport/pipeline.py` FFmetadata/M4B/cover/FFprobe      |
+      Readio's audiobook metadata defaults, project & timeline freshness checks, cover
+      selection, audiobook-state identity |
+
+
+      The new independent package is not a verbatim file move: generic FFmpeg/chapter
+      logic was adapted and decoupled from `Project`, `soundfile`, `numpy`, `audiocompose`,
+      and Readio exception classes. M4B chapter timelines can be read as-is, without
+      importing Readio."
+    links:
+      - source_id: py:file:audioexport/chapters.py
+        source_path: audioexport/chapters.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The migration table identifies the chapter implementation file.
+        tracked_hashes:
+          body_hash: dfb78ce19d4fcbaaa60754e7d10e42934645c7ba892baf240e494b49b2e49812
+      - source_id: py:file:audioexport/fftools.py
+        source_path: audioexport/fftools.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The migration table identifies the FFmpeg and FFprobe integration file.
+        tracked_hashes:
+          body_hash: 46a0664084aa366177e842de6a5d64677960ba6113c60f9262c826661b6a8485
+      - source_id: py:file:audioexport/pipeline.py
+        source_path: audioexport/pipeline.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The migration table identifies the export pipeline file.
+        tracked_hashes:
+          body_hash: c87a93e927081e1bc32ceef7692a664e85c4a338cccd63ecbd07b79ed497ee20
+      - source_id: py:function:audioexport/pipeline.py::encode
+        source_path: audioexport/pipeline.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The bridge example calls the public encode function.
+        tracked_hashes:
+          body_hash: d2a82f639bb5615c6ffd0ecc8e00d6cce76a40bb858460bcb156496a26e2cc3c
+      - source_id: py:function:audioexport/preflight.py::preflight_profile
+        source_path: audioexport/preflight.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The bridge example uses the read-only profile preflight function.
+        tracked_hashes:
+          body_hash: 9ab32079085a37c889703db35b2629586344c9eb9d050f8bd32826e64986003c
+      - source_id: py:function:audioexport/profile.py::load_profile
+        source_path: audioexport/profile.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The bridge example loads a profile through the public loader.
+        tracked_hashes:
+          body_hash: f6b1793bc67b76c9364f3ebe9df0750ff29519479affd329cfbee6425341110b
+      - source_id: py:function:audioexport/profile.py::resolve_output
+        source_path: audioexport/profile.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The migration notes describe single-output profile resolution.
+        tracked_hashes:
+          body_hash: 22bb62c8baef3a9f63d7dd4be7b7c8ddd29f892d7532b378af3b738e0286b2b8
+  - section_id: md:section:docs/readio-migration.md::current-state
+    doc_path: docs/readio-migration.md
+    heading_path:
+      - "Readio -> audioexport: compatibility-first extraction"
+      - Current state
+    heading_slug: current-state
+    line_span:
+      - 16
+      - 19
+    section_hash: 61205f650108804d92272901d2329206189b7761dc845e8f89f969bf1261dee2
+    summary: Current state
+    text: "## Current state
+
+
+      **No existing Readio files are changed by this archive**. In particular, no import
+      from `readio` appears in `audioexport/`. There is no dependency from `audioexport`
+      to UtterPlan, AudioCompose, VoiceRender, or Readio. Readio still owns its complete
+      legacy fallback; switching it to this exporter is an intentionally separate step."
+    links: []
+  - section_id: md:section:docs/readio-migration.md::next-pr-in-the-readio-repository
+    doc_path: docs/readio-migration.md
+    heading_path:
+      - "Readio -> audioexport: compatibility-first extraction"
+      - Next PR, in the Readio repository
+    heading_slug: next-pr-in-the-readio-repository
+    line_span:
+      - 20
+      - 29
+    section_hash: cc8fd3f855095570fac5b7387fb3f06a65968c8b7d07e2b327fb0ec4550c7024
+    summary: Next PR, in the Readio repository
+    text: "## Next PR, in the Readio repository
+
+
+      1. Capture golden baseline for `readio export` (WAV/FLAC/MP3/M4A/OGG/Opus), `readio
+      audiobook export` (M4B metadata/chapters/cover), `readio speak --format`, cache/status/force;
+      verify existing test suites.
+
+      2. Publish an installable audioexport release; pin an explicitly tested version
+      range in Readio, initially via an optional `audioexport` extra or mandatory dep
+      only when stabilized.
+
+      3. Add a **feature-flagged bridge**, e.g. environment/config `READIO_AUDIOEXPORT=1`.
+      Leave default/legacy execution untouched initially. The bridge's only encoding
+      operation is `audioexport.encode(...)` from Python, **not a subprocess invocation
+      of `audioexport` CLI**.
+
+      4. In `readio/stages/export.py`, load the `audioexport.profile.v1` once and call
+      `preflight_profile(profile, master, ffmpeg=..., ffprobe=...)` before any export
+      write. Preflight returns `ResolvedOutput` values in TOML order, but has no destination/output-directory
+      input and does not write or authorize replacement. For each selected output, Readio
+      chooses its target and performs its own project freshness, collision/ownership/provenance,
+      overwrite-authorization, lock, and state checks before calling `encode()` with
+      the resolved format, bitrate, profile metadata, cover, and timeline. Readio then
+      updates its own state/index/result. A single-spec operation may use `resolve_output()`;
+      use full preflight when all configured outputs must validate.
+
+      5. In `readio/stages/audiobook_export.py`, retain `prepare_audiobook_export()`
+      and its project freshness checks. If the bridge uses an `audioexport.profile.v1`
+      profile for the prepared master, load it once and preflight its complete output
+      list before writing; Readio still performs its own target-ownership and overwrite
+      checks before encoding. Pass the resolved timeline, cover, effective bitrate,
+      and profile metadata along with `prepared.master` to `encode()`. Preserve Readio's
+      title/author mapping, error-code translations, and return fields, including `chapter_count`.
+
+      6. Keep the old encoding path for `speak --format` until stream/buffer parity
+      is explicitly addressed: `audioexport.encode()` consumes an **existing file**,
+      whereas `readio/wave.py` currently also supports **PCM streaming**. An intermediate
+      temporary WAV adapter can work but should be isolated/tested, not silently forced
+      on the live path.
+
+      7. Run the existing Readio format, export, audiobook, CLI, API and project-state
+      test suites. On parity, enable the flag progressively, then deprecate the redundant
+      encoding implementation in a later PR. Rollback = feature flag off; never delete
+      last-good artifacts."
+    links: []
+  - section_id: md:section:docs/readio-migration.md::profile-based-bridge-shape-illustrative-not-a-drop-in-patch
+    doc_path: docs/readio-migration.md
+    heading_path:
+      - "Readio -> audioexport: compatibility-first extraction"
+      - Profile-based bridge shape (illustrative, not a drop-in patch)
+    heading_slug: profile-based-bridge-shape-illustrative-not-a-drop-in-patch
+    line_span:
+      - 30
+      - 72
+    section_hash: 9f4b123e87b2cc297ff6631ad04f36d6a2fbe3ef292b5ae91f7fff6b137e1ce9
+    summary: Profile-based bridge shape (illustrative, not a drop-in patch)
+    text:
+      "## Profile-based bridge shape (illustrative, not a drop-in patch)\n\n```python\n\
+      from pathlib import Path\nfrom audioexport import encode, load_profile, preflight_profile\n\
+      \n# Load the profile once, then prove all configured outputs are encodable before\
+      \ writing.\nprofile = load_profile(profile_path)\nresolved_outputs = preflight_profile(\n\
+      \    profile,\n    master,\n    ffmpeg=ffmpeg,\n    ffprobe=ffprobe,\n)\n\nfor\
+      \ resolved in resolved_outputs:\n    target = Path(readio_destination) / resolved.filename\n\
+      \n    # Readio-owned checks happen after read-only preflight and before encode:\n\
+      \    # freshness, project lock, destination collision/ownership, provenance,\n\
+      \    # overwrite authorization, and state policy.\n    result = encode(\n    \
+      \    master,\n        target,\n        format=resolved.format,\n        bitrate=resolved.bitrate,\n\
+      \        metadata=profile.metadata,\n        cover=resolved.cover,\n        timeline=resolved.timeline,\n\
+      \        force=readio_authorized_replace,\n        ffmpeg=ffmpeg,\n        ffprobe=ffprobe,\n\
+      \    )\n\n    # Readio stores its own state/index/result after each successful\
+      \ encode.\n```\n\n`preflight_profile()` never takes an output directory or chooses\
+      \ a target. It validates the complete loaded profile without creating audio, manifests,\
+      \ temporary files, or directories. A caller can instead call `resolve_output(profile,\
+      \ spec, source_stem)` when it only needs one selected output's effective settings;\
+      \ it still must run the appropriate Readio checks before writing.\n\n**Important\
+      \ nuance:** For `readio export` with a tracked file that has changed inputs, using\
+      \ a new sidecar for the first time means the target appears untracked to audioexport.\
+      \ While bridging, Readio must explicitly authorize replace by passing `force=True`\
+      \ **only after Readio's own ownership check**; this applies even when its existing\
+      \ `force` flag was false. Never broaden replacement for arbitrary external targets.\n\
+      \nFor M4B the existing Readio source validates `composition-state` against master/timeline\
+      \ digests before export. AudioExport validates chapter JSON and media, but it\
+      \ deliberately does not know the Readio project state. Those validations must\
+      \ remain in Readio's wrapper."
+    links: []
+  - section_id: md:section:docs/readio-migration.md::differences-to-preserve-or-accept-deliberately
+    doc_path: docs/readio-migration.md
+    heading_path:
+      - "Readio -> audioexport: compatibility-first extraction"
+      - Differences to preserve or accept deliberately
+    heading_slug: differences-to-preserve-or-accept-deliberately
+    line_span:
+      - 73
+      - 80
+    section_hash: eb21f5ba6dec789af00d84c881c37d9d9a4397a8a3d35532b7f7c12ab18e23e1
+    summary: Differences to preserve or accept deliberately
+    text: "## Differences to preserve or accept deliberately
+
+
+      - Readio's generic MP3/FLAC/OGG were written using `soundfile`; AudioExport uses
+      FFmpeg for all encoders, so bitstreams and encoder provenance differ (expected).
+      Tests should compare format, basic audio duration/properties, metadata and semantic
+      chapter times, not exact bytes.
+
+      - Readio's bitrate CLI historically supports only M4A and Opus for generic `export`;
+      AudioExport also supports MP3, OGG and M4B. Keep old Readio validation on the
+      bridge until changing Readio's public contract deliberately.
+
+      - AudioExport's `audioexport.manifest.v1` is independent of Readio `readio.export-state`,
+      and its identity includes source hashes, metadata/cover/chapters and FFmpeg/FFprobe
+      version. Readio must not mistake the new sidecar for the old project index.
+
+      - A Readio sample-based timeline is supported, but its original project plan/metadata
+      IDs are intentionally not validated outside Readio.
+
+      - Export-only change never triggers voice synthesis or composition. Readio's
+      current project-level freshness must remain the source of truth."
+    links: []
+  - section_id: md:section:docs/readio-migration.md::acceptance-gates-before-switching-readio-by-default
+    doc_path: docs/readio-migration.md
+    heading_path:
+      - "Readio -> audioexport: compatibility-first extraction"
+      - Acceptance gates before switching Readio by default
+    heading_slug: acceptance-gates-before-switching-readio-by-default
+    line_span:
+      - 81
+      - 87
+    section_hash: 0400a7ac8f0ab94d0b40127ce1f835651f64c8320838362b9b19acc44c7a1adc
+    summary: Acceptance gates before switching Readio by default
+    text: "## Acceptance gates before switching Readio by default
+
+
+      - All 7 standalone formats encode in CI and produce correct probed codec.
+
+      - M4B chapter order/title/starts/ends, cover, and author/title tags survive.
+
+      - Changes to bitrate/title/cover affect export only, and unchanged exports are
+      reusable.
+
+      - Readio's `export`, `audiobook export`, and `speak` old signatures, errors,
+      project indexes, and project state survive.
+
+      - No circular dependencies; last-good project remains readable/resumable."
+    links: []
+last_fresh_scan_version: 2
+last_fresh_hash: 5ada8bcfc37e54b9c9e4e8b61dc43b4d3509925d7f0af890ba2133e188c76b2a
+notes:
+  Bootstrap documentation completed after scan version 2; README and Sphinx index
+  are linked, while generated changelog and intentionally omitted internal/test units
+  remain unlinked by review.
+version: 6

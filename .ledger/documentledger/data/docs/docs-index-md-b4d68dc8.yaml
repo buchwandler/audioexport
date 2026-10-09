@@ -1,0 +1,278 @@
+schema: documentledger.doc_record.v4
+doc_path: docs/index.md
+linked_sources:
+  - audioexport/audiobook.py
+  - audioexport/chapters.py
+  - audioexport/errors.py
+  - audioexport/pipeline.py
+sections:
+  - section_id: md:section:docs/index.md::audioexport
+    doc_path: docs/index.md
+    heading_path:
+      - audioexport
+    heading_slug: audioexport
+    line_span:
+      - 1
+      - 15
+    section_hash: f2e2d8c36dad72765cb5c1b63d949b380dcdba9ed71c6b053b3898bee41dab93
+    summary: audioexport
+    text: "# audioexport
+
+
+      `audioexport` is a standalone Python library and command-line interface for
+
+      exporting audio through FFmpeg. It accepts any FFmpeg-decodable audio source
+
+      and produces reproducible, verified output artifacts without importing Readio,
+
+      AudioCompose, UtterPlan, or a synthesis engine.
+
+
+      ```{toctree}
+
+      :maxdepth: 2
+
+      :caption: Documentation
+
+
+      readio-migration
+
+      changelog
+
+      ```"
+    links: []
+  - section_id: md:section:docs/index.md::requirements
+    doc_path: docs/index.md
+    heading_path:
+      - audioexport
+      - Requirements
+    heading_slug: requirements
+    line_span:
+      - 16
+      - 38
+    section_hash: 36a8fa482ef5a008534bc5a2e495fe8f2035035dfecc0d83b24dbcf9ef1a66f5
+    summary: Requirements
+    text: "## Requirements
+
+
+      - Python 3.10 or newer
+
+      - FFmpeg and FFprobe available on `PATH`
+
+      - An FFmpeg build with the encoders required by the selected formats
+
+
+      Install the package and the documentation toolchain with:
+
+
+      ```bash
+
+      python -m pip install -e .
+
+      python -m pip install -r docs/requirements.txt
+
+      ```
+
+
+      Check the local FFmpeg installation before exporting:
+
+
+      ```bash
+
+      audioexport doctor --json
+
+      ```
+
+
+      The diagnostic reports tool versions and encoder availability. A missing
+
+      optional encoder only prevents the affected format; it does not make unrelated
+
+      formats unavailable."
+    links: []
+  - section_id: md:section:docs/index.md::command-line-quickstart
+    doc_path: docs/index.md
+    heading_path:
+      - audioexport
+      - Command-line quickstart
+    heading_slug: command-line-quickstart
+    line_span:
+      - 39
+      - 61
+    section_hash: d49ada5892eaf3ad3a700e5786cfdfd0a9ebf842e8ec69647765f7551e37cf02
+    summary: Command-line quickstart
+    text:
+      "## Command-line quickstart\n\nCreate or provide an audio source, then encode\
+      \ it to one format:\n\n```bash\npython examples/create_demo_wav.py\naudioexport\
+      \ encode demo.wav --format mp3 -o output.mp3 --bitrate 192k\naudioexport inspect\
+      \ output.mp3 --json\n```\n\nMetadata, cover art, and chapters can be supplied\
+      \ for formats that support\nthem:\n\n```bash\naudioexport encode demo.wav --format\
+      \ m4b -o audiobook.m4b \\\n  --title \"My Book\" --artist \"An Author\" \\\n \
+      \ --timeline examples/chapters.json --cover cover.jpg --bitrate 192k\n```\n\n\
+      The supported output formats are WAV, FLAC, MP3, M4A, M4B, OGG, and Opus.\nWAV\
+      \ and FLAC do not accept a bitrate. M4A and M4B support embedded chapter\nmarkers;\
+      \ MP3, M4A, and M4B support cover art."
+    links: []
+  - section_id: md:section:docs/index.md::multi-format-profiles
+    doc_path: docs/index.md
+    heading_path:
+      - audioexport
+      - Multi-format profiles
+    heading_slug: multi-format-profiles
+    line_span:
+      - 62
+      - 78
+    section_hash: 936c590c73c9ad284915c2d2d9d81c27e75018aa82c839521c2a5c78e0492e80
+    summary: Multi-format profiles
+    text:
+      "## Multi-format profiles\n\nUse an `audioexport.profile.v1` TOML file when\
+      \ the same source should produce\nseveral outputs:\n\n```bash\naudioexport run\
+      \ demo.wav \\\n  --profile examples/export.toml \\\n  --out-dir exported/ \\\n\
+      \  --json\n```\n\n`run` validates every profile output, resource, encoder, and\
+      \ filename before\nwriting the first artifact. Profile resources are resolved\
+      \ relative to the\nprofile file. `preflight_profile()` exposes the same read-only\
+      \ validation for\nPython callers."
+    links: []
+  - section_id: md:section:docs/index.md::audiobook-assembly
+    doc_path: docs/index.md
+    heading_path:
+      - audioexport
+      - Audiobook assembly
+    heading_slug: audiobook-assembly
+    line_span:
+      - 79
+      - 93
+    section_hash: 3c316fe9bd64ddab01d8892b481a38c69c37d332a6562a75e7ab31b6f00e026c
+    summary: Audiobook assembly
+    text:
+      "## Audiobook assembly\n\n`encode` converts one prepared source. To combine\
+      \ ordered tracks or a\nnon-recursive directory of tracks into one M4B audiobook,\
+      \ use `audiobook`:\n\n```bash\naudioexport audiobook book-tracks/ -o book.m4b\
+      \ \\\n  --title \"My Book\" --author \"Author Name\" --cover cover.jpg\n```\n\n\
+      Each track becomes a chapter by default. Use `--chapters-file` for explicit\n\
+      chapter boundaries, or provide an `audioexport.audiobook.v1` profile for a\nrepeatable\
+      \ assembly. The audiobook workflow normalizes tracks, concatenates\nthem, writes\
+      \ metadata and chapters, and verifies the final artifact."
+    links:
+      - source_id: py:function:audioexport/audiobook.py::build_audiobook
+        source_path: audioexport/audiobook.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The guide documents audiobook assembly.
+        tracked_hashes:
+          body_hash: 072b0778315b75a3d8159506cfa394589e6de34d76d9196337ba658ba1c7101f
+  - section_id: md:section:docs/index.md::python-api
+    doc_path: docs/index.md
+    heading_path:
+      - audioexport
+      - Python API
+    heading_slug: python-api
+    line_span:
+      - 94
+      - 129
+    section_hash: e467b8c60f1fd8b576242f29495860e70c543d5077155f1931c9de82f2ed9c2f
+    summary: Python API
+    text:
+      "## Python API\n\nThe public API is available from both `audioexport` and\
+      \ `audioexport.api`:\n\n```python\nfrom pathlib import Path\n\nfrom audioexport\
+      \ import Chapter, encode\n\nresult = encode(\n    Path(\"master.wav\"),\n    Path(\"\
+      exports/book.m4b\"),\n    format=\"m4b\",\n    bitrate=\"192k\",\n    metadata={\"\
+      title\": \"My Book\", \"artist\": \"An Author\"},\n    chapters=[\n        Chapter(\"\
+      Introduction\", start_ms=0),\n        Chapter(\"Chapter One\", start_ms=60_000),\n\
+      \    ],\n)\nprint(result.path, result.reused, result.output_sha256)\n```\n\nImportant\
+      \ public entry points include:\n\n- `encode()` for one prepared source\n- `run_profile()`\
+      \ for multiple configured outputs\n- `build_audiobook()` for ordered-track assembly\n\
+      - `preflight_profile()` for read-only profile validation\n- `doctor()` and `probe()`\
+      \ for tool and artifact diagnostics\n- `load_profile()` and `load_audiobook_profile()`\
+      \ for TOML profiles\n\nExports return an immutable result with the output path,\
+      \ codec, export identity,\nchecksum, manifest path, reuse state, and chapter count.\
+      \ Public failures use\n`AudioExportError` subclasses with stable machine-readable\
+      \ error codes."
+    links:
+      - source_id: py:class:audioexport/chapters.py::Chapter
+        source_path: audioexport/chapters.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The guide uses Chapter in its public API example.
+        tracked_hashes:
+          body_hash: 94eab318cc04bd8932bc5b69eec03f8b2f37ec9a5f0ef1e8c4d9daadc5cfa88f
+      - source_id: py:class:audioexport/errors.py::AudioExportError
+        source_path: audioexport/errors.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The guide documents the public error hierarchy.
+        tracked_hashes:
+          body_hash: 4eb6240ac0d60e5544c22214ae13b46f150b7999a9d8f43ad33ca7cb655b7bc6
+      - source_id: py:class:audioexport/pipeline.py::ExportResult
+        source_path: audioexport/pipeline.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The guide documents the result returned by encode.
+        tracked_hashes:
+          body_hash: 4d91ba769dc9ef777cfe267c0759ac8bfa516e4520d9193d363a71a93d41f60b
+      - source_id: py:function:audioexport/pipeline.py::encode
+        source_path: audioexport/pipeline.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The guide documents the primary encoding function.
+        tracked_hashes:
+          body_hash: d2a82f639bb5615c6ffd0ecc8e00d6cce76a40bb858460bcb156496a26e2cc3c
+      - source_id: py:function:audioexport/pipeline.py::run_profile
+        source_path: audioexport/pipeline.py
+        coverage: implementation-note
+        impact: unknown
+        reason: The guide documents multi-format profiles.
+        tracked_hashes:
+          body_hash: 552f0418b0e95ede4d37bd4ccdae36b816aea601d4e7224155c98e136e8d477e
+  - section_id: md:section:docs/index.md::artifact-safety-and-reuse
+    doc_path: docs/index.md
+    heading_path:
+      - audioexport
+      - Artifact safety and reuse
+    heading_slug: artifact-safety-and-reuse
+    line_span:
+      - 130
+      - 141
+    section_hash: c2a3c2ccb6fa38ab58d590a990a3093ed09f83d28940b4fc30be12847350ab43
+    summary: Artifact safety and reuse
+    text: "## Artifact safety and reuse
+
+
+      Each generated audio file has an adjacent
+
+      `.audioexport.json` manifest. The manifest records the inputs and settings used
+
+      to calculate the export identity. Repeating an unchanged export reuses the
+
+      existing artifact instead of encoding again.
+
+
+      By default, an unknown, modified, or symlink output is not overwritten. Use
+
+      `--force` only when replacing a regular file is explicitly authorized. Writes
+
+      are staged with the manifest, committed atomically where possible, and guarded
+
+      by a per-target process lock."
+    links: []
+  - section_id: md:section:docs/index.md::further-information
+    doc_path: docs/index.md
+    heading_path:
+      - audioexport
+      - Further information
+    heading_slug: further-information
+    line_span:
+      - 142
+      - 148
+    section_hash: 2e6afb057f380f5b67e9176a71b7546c2fa6f4cc1870c1e9367849eda2aa297a
+    summary: Further information
+    text:
+      "## Further information\n\n- [`README.md`](https://github.com/buchwandler/audioexport/blob/main/README.md)\
+      \ —\n  complete usage reference and examples\n- [Readio migration notes](readio-migration.md)\
+      \ — compatibility boundaries and\n  the planned integration shape\n- [Changelog](changelog.md)\
+      \ — release history"
+    links: []
+last_fresh_scan_version: 3
+last_fresh_hash: bc0b2a9465eacd37eaaf744f22e379e47d5b880ae8b1b3586cbcbb63f1ab445e
+notes: Updated the Sphinx landing page README link after the final documentation build.
+version: 9

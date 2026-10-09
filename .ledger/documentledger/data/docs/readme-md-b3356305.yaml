@@ -1,0 +1,619 @@
+schema: documentledger.doc_record.v4
+doc_path: README.md
+linked_sources:
+  - audioexport/audiobook.py
+  - audioexport/chapters.py
+  - audioexport/errors.py
+  - audioexport/pipeline.py
+sections:
+  - section_id: md:section:README.md::audioexport
+    doc_path: README.md
+    heading_path:
+      - audioexport
+    heading_slug: audioexport
+    line_span:
+      - 1
+      - 6
+    section_hash: 604ca2daab1d007e3a508c4ec27d4318eeeb5f6ea721418839b572f3acbc4ade
+    summary: audioexport
+    text: "# audioexport
+
+
+      An independent Python library and command-line interface for exporting audio through
+      **FFmpeg**. This is the first extraction step from Readio's output/encoding subsystem,
+      but **audioexport does not import or install Readio, AudioCompose, UtterPlan,
+      or synthesis engines**.
+
+
+      Supported formats: WAV (PCM16), FLAC, MP3, M4A (AAC), M4B (AAC audiobook), OGG
+      (Vorbis), and Opus. Handles tagged metadata, embedded JPEG/PNG cover art for MP3/M4A/M4B,
+      JSON chapter timelines for M4A/M4B, standalone ordered multi-track audiobook assembly,
+      FFprobe verification, artifact identities and safe reuse."
+    links: []
+  - section_id: md:section:README.md::install
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - Install
+    heading_slug: install
+    line_span:
+      - 7
+      - 28
+    section_hash: 9e477aa39b07b49eb06bb58abd2364eac675ae065fe5b4105ad6be20e443bd83
+    summary: Install
+    text: "## Install
+
+
+      Requirements: **Python 3.10+** and external **FFmpeg + FFprobe** executables available
+      on `PATH`. Install a build containing the encoders you need: `pcm_s16le`, `flac`,
+      `libmp3lame`, `aac`, `libvorbis` (or native `vorbis`), and/or `libopus`.
+
+
+      Platform notes:
+
+
+      - Ubuntu/Debian: `sudo apt-get install ffmpeg`.
+
+      - macOS: `brew install ffmpeg`.
+
+      - Windows: install a current FFmpeg build and add its `bin` directory to `PATH`.
+
+
+      ```bash
+
+      python -m pip install audioexport
+
+      python -m audioexport --version
+
+      # Or install from a checkout:
+
+      python -m pip install -e .
+
+      audioexport doctor --json
+
+      ```
+
+
+      `doctor` reports package/tool versions and encoder availability per format. Its
+      existing `ready` key means FFmpeg and FFprobe are present; `all_formats_ready`
+      and each `formats` entry report encoder capability and a reason when unavailable.
+      The additive `features` entries report `m4b_encode`, `m4b_audiobook`, and `m4b_stream_copy`
+      availability; missing optional capabilities do not make `ready` false. `run_profile()`
+      checks the encoders selected by the profile before writing outputs.
+
+
+      The only base Python dependency is `tomli` on Python 3.10. FFmpeg/FFprobe are
+      external executables; AudioExport does not install or import Readio, AudioCompose,
+      UtterPlan, VoiceRender, soundfile, or NumPy."
+    links: []
+  - section_id: md:section:README.md::cli-quickstart
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - CLI quickstart
+    heading_slug: cli-quickstart
+    line_span:
+      - 29
+      - 52
+    section_hash: 1a79beb70f550e93685237324ecec59160da3b00907c3374c12d5fb399df8a36
+    summary: CLI quickstart
+    text:
+      "## CLI quickstart\n\n```bash\n# Creates demo.wav in the current directory\
+      \ (or use your own audio file):\npython examples/create_demo_wav.py\n# Any FFmpeg-decodable\
+      \ audio source is accepted.\naudioexport encode demo.wav --format mp3 -o output.mp3\
+      \ --bitrate 192k\naudioexport encode demo.wav --format flac -o output.flac\naudioexport\
+      \ encode demo.wav --format m4a -o output.m4a --title \"My recording\" --artist\
+      \ \"An author\"\naudioexport encode demo.wav --format ogg -o output.ogg\naudioexport\
+      \ encode demo.wav --format opus -o output.opus\n\naudioexport inspect output.mp3\
+      \ --json\naudioexport doctor --json\n\n# For M4B chapters; use your own cover.jpg\
+      \ or omit --cover:\naudioexport encode demo.wav --format m4b -o mybook.m4b \\\n\
+      \  --title \"My Book\" --artist \"An Author\" \\\n  --timeline examples/chapters.json\
+      \ --cover cover.jpg --bitrate 192k\n\n# Export multiple formats at once using\
+      \ an editable profile:\naudioexport run demo.wav --profile examples/export.toml\
+      \ --out-dir exported/ --json\n```"
+    links: []
+  - section_id: md:section:README.md::standalone-audiobook-assembly
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - Standalone audiobook assembly
+    heading_slug: standalone-audiobook-assembly
+    line_span:
+      - 53
+      - 124
+    section_hash: db1fcd2e1f9ac033a73a6ad84b9d81de61f3598d0ee35b03f1a2d14813a4e11e
+    summary: Standalone audiobook assembly
+    text:
+      "## Standalone audiobook assembly\n\n`encode` converts one already-prepared\
+      \ audio source to a format; it does not merge a collection of source tracks. Use\
+      \ the separate `audiobook` workflow when starting from ordered tracks or a directory:\n\
+      \n```bash\n# Direct directory input: immediate audio files only, natural filename\
+      \ ordering.\naudioexport audiobook book-tracks/ -o book.m4b \\\n  --title \"My\
+      \ Book\" --author \"Author Name\" --album \"My Book\" --cover cover.jpg\n\n# Or\
+      \ provide an explicit order; source title tags become chapter titles when present.\n\
+      audioexport audiobook 01-intro.mp3 02-chapter-one.flac 03-chapter-two.wav \\\n\
+      \  -o book.m4b --bitrate 96k --language eng\n\n# Explicit chapter starts from\
+      \ chapters.txt or the existing JSON/Readio timeline format.\naudioexport audiobook\
+      \ book-tracks/ -o book.m4b --chapters-file chapters.txt\n```\n\nEach source track\
+      \ becomes one chapter by default. Chapter starts use normalized segment durations;\
+      \ titles prefer an explicit `AudiobookTrack` title, then the source title tag,\
+      \ then the filename stem. Tracks are serially normalized to common AAC settings,\
+      \ concatenated with stream copy, and final-muxed without a second audio encode.\
+      \ Sample rate and channel count default from the first track; only mono/stereo\
+      \ targets are supported. The audiobook command defaults to the FFmpeg-compatible\
+      \ `media_type=2` tag. `--author` (or its `--artist` alias) writes the player-compatible\
+      \ `artist` tag; `--album-artist`, `--writer`, and `--long-description` map to\
+      \ `album_artist`, `composer`, and `synopsis`. `--metadata KEY=VALUE` adds or overrides\
+      \ an FFmpeg tag.\n\nFor one directory input, the CLI discovers `cover.jpg`, then\
+      \ `cover.jpeg`, then `cover.png`, plus `chapters.txt`, when explicit resources\
+      \ were not supplied. Discovered names appear in command output and the audiobook\
+      \ manifest. Use `--no-auto-sidecars` to disable this behavior. The library API\
+      \ does not scan sibling files unless called with `discover_sidecars=True`.\n\n\
+      Python callers can use the same assembly workflow without invoking the CLI:\n\n\
+      ```python\nfrom audioexport import AudiobookMetadata, AudiobookTrack, build_audiobook\n\
+      \nresult = build_audiobook(\n    [\n        AudiobookTrack(\"01-intro.mp3\", title=\"\
+      Introduction\"),\n        \"02-chapter-one.flac\",\n    ],\n    \"book.m4b\",\n\
+      \    metadata=AudiobookMetadata(title=\"My Book\", author=\"Author Name\"),\n\
+      \    cover=\"cover.jpg\",\n)\nprint(result.track_count, result.chapter_count,\
+      \ result.reused)\n```\n\nA separate `audioexport.audiobook.v1` profile describes\
+      \ ordered inputs and explicit resources. All relative paths resolve from the profile\
+      \ file; no glob or implicit directory expansion is used in TOML. `chapters_file`\
+      \ is a top-level resource path, while `[chapters]` selects its mode:\n\n```toml\n\
+      schema = \"audioexport.audiobook.v1\"\noutput = \"My Book.m4b\"\ninputs = [\"\
+      01 Intro.mp3\", \"02 Chapter One.flac\"]\ncover = \"cover.jpg\"\nchapters_file\
+      \ = \"chapters.txt\"\n\n[audio]\nbitrate = \"96k\"\nsample_rate = 44100\nchannels\
+      \ = 2\n\n[metadata]\ntitle = \"My Book\"\nauthor = \"Author Name\"\nalbum = \"\
+      My Book\"\ngenre = \"Audiobook\"\nlanguage = \"eng\"\n\n[chapters]\nmode = \"\
+      explicit\"       # tracks | explicit | none\n# title_source = \"tag\"  # tag (falls\
+      \ back to filename) | filename\n```\n\nRun it with `audioexport audiobook --profile\
+      \ audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file`\
+      \ override profile values; the TOML input order remains authoritative. `mode =\
+      \ \"tracks\"` (the default) creates one chapter per track; `mode = \"explicit\"\
+      ` requires `chapters_file`; `mode = \"none\"` disables chapters. Existing `encode(...,\
+      \ format=\"m4b\", timeline=...)` remains the right choice for Readio's prepared\
+      \ master and project timeline.\n\nIf `--output` is not set for `encode`, the output\
+      \ filename defaults to the input stem and chosen format. To avoid destroying the\
+      \ input, encoding input and output to the same real path is always rejected.\n\
+      \nWithout `--force`, an untracked, symlink, or manually modified output is never\
+      \ overwritten. A previously generated output is updated when its sidecar and checksum\
+      \ still match; re-running identical options returns `reused: true` without re-encoding.\
+      \ `--force` authorizes replacing an unknown or modified regular file, but symlink\
+      \ outputs and sidecars are always rejected. Writes are staged with their manifest;\
+      \ a failed manifest commit restores the last good pair when possible, and an incomplete\
+      \ recovery reports the preserved backup path. A per-target process lock rejects\
+      \ concurrent writers with `audioexport.output_busy`; remove a stale lock only\
+      \ after confirming no writer is active.\n\nOGG defaults to Vorbis quality-based\
+      \ encoding (`-qscale:a 4`) to avoid low-rate/mono bitrate incompatibilities. `--bitrate`\
+      \ accepts values such as `192k`, `192000`, or `1M`; whitespace is trimmed. A bare\
+      \ integer is interpreted as **bits per second**, so use `192k` (or `192000`),\
+      \ not `192`, for a nominal 192 kb/s rate. WAV/FLAC don't accept bitrate. WAV output\
+      \ is always PCM16 conversion, not a byte-for-byte passthrough; lossy codecs and\
+      \ even PCM output can vary with FFmpeg versions, which are included in the export\
+      \ identity."
+    links:
+      - source_id: py:class:audioexport/audiobook.py::AudiobookTrack
+        source_path: audioexport/audiobook.py
+        coverage: implementation-note
+        impact: unknown
+        reason: README documents the public audiobook track class.
+        tracked_hashes:
+          body_hash: 31db1c815aca74f53705e98e190bc4f70e856241deb8fbff374eb67ce4cf4be4
+      - source_id: py:function:audioexport/audiobook.py::build_audiobook
+        source_path: audioexport/audiobook.py
+        coverage: implementation-note
+        impact: unknown
+        reason: README documents the public audiobook assembly function.
+        tracked_hashes:
+          body_hash: 072b0778315b75a3d8159506cfa394589e6de34d76d9196337ba658ba1c7101f
+      - source_id: py:class:audioexport/chapters.py::Chapter
+        source_path: audioexport/chapters.py
+        coverage: implementation-note
+        impact: unknown
+        reason: README documents chapter construction and timelines.
+        tracked_hashes:
+          body_hash: 94eab318cc04bd8932bc5b69eec03f8b2f37ec9a5f0ef1e8c4d9daadc5cfa88f
+  - section_id: md:section:README.md::python-api
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - Python API
+    heading_slug: python-api
+    line_span:
+      - 125
+      - 157
+    section_hash: 74e70cb7a176d6575daba94555e153509174523b60bdd0f7d4554d381b4e746c
+    summary: Python API
+    text:
+      "## Python API\n\n```python\nimport audioexport\nfrom pathlib import Path\n\
+      from audioexport import Chapter, encode, run_profile, doctor, probe\n\nresult\
+      \ = encode(\n    Path(\"master.wav\"),\n    Path(\"exported/book.m4b\"),\n   \
+      \ format=\"m4b\", bitrate=\"192k\",\n    metadata={\"title\": \"My Book\", \"\
+      artist\": \"Author Name\"},\n    cover=Path(\"cover.jpg\"),\n    chapters=[\n\
+      \        Chapter(\"Introduction\", start_ms=0),\n        Chapter(\"Chapter One\"\
+      , start_ms=60_000),\n    ],\n)\nprint(result.to_dict())\n\nfor other in run_profile(\"\
+      master.wav\", \"examples/export.toml\", \"exported\"):\n    print(other.path,\
+      \ other.reused)\n\nprint(audioexport.__version__)\ndiagnostics = doctor()\nprint(diagnostics[\"\
+      ready\"], diagnostics[\"all_formats_ready\"])\nprint(probe(\"exported/book.m4b\"\
+      )[\"chapters\"])\n```\n\nYou may import the same public functions from `audioexport.api`\
+      \ as well as from `audioexport`.\n\nThe public errors are `AudioExportError` and\
+      \ subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`,\
+      \ with a stable machine-readable `.code` value. `encode()` returns an immutable\
+      \ `ExportResult`; `build_audiobook()` returns an `AudiobookResult` with track/chapter\
+      \ counts and verified duration. Both APIs include identity, path, checksum, and\
+      \ reuse state, and work without a Readio project."
+    links:
+      - source_id: py:class:audioexport/errors.py::AudioExportError
+        source_path: audioexport/errors.py
+        coverage: implementation-note
+        impact: unknown
+        reason: README documents the public error hierarchy.
+        tracked_hashes:
+          body_hash: 4eb6240ac0d60e5544c22214ae13b46f150b7999a9d8f43ad33ca7cb655b7bc6
+      - source_id: py:class:audioexport/pipeline.py::ExportResult
+        source_path: audioexport/pipeline.py
+        coverage: implementation-note
+        impact: unknown
+        reason: README documents the export result contract.
+        tracked_hashes:
+          body_hash: 4d91ba769dc9ef777cfe267c0759ac8bfa516e4520d9193d363a71a93d41f60b
+      - source_id: py:function:audioexport/pipeline.py::encode
+        source_path: audioexport/pipeline.py
+        coverage: implementation-note
+        impact: unknown
+        reason: README documents the primary encoding function.
+        tracked_hashes:
+          body_hash: d2a82f639bb5615c6ffd0ecc8e00d6cce76a40bb858460bcb156496a26e2cc3c
+      - source_id: py:function:audioexport/pipeline.py::run_profile
+        source_path: audioexport/pipeline.py
+        coverage: implementation-note
+        impact: unknown
+        reason: README documents profile-based exports.
+        tracked_hashes:
+          body_hash: 552f0418b0e95ede4d37bd4ccdae36b816aea601d4e7224155c98e136e8d477e
+  - section_id: md:section:README.md::export-profile
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - Export profile
+    heading_slug: export-profile
+    line_span:
+      - 158
+      - 207
+    section_hash: 8b39e043aaaaef7d5a974f3e0ff9dad2476d3a1303022dcc236a0ab094a1bdfa
+    summary: Export profile
+    text: '## Export profile
+
+
+      [`examples/export.toml`](examples/export.toml) is a complete seven-format example.
+      The `audioexport.profile.v1` schema keeps profile-wide `cover`, `timeline`, and
+      `[metadata]`, while each `[[outputs]]` row may add `use_cover` and `use_chapters`:
+
+
+      ```toml
+
+      schema = "audioexport.profile.v1"
+
+      timeline = "chapters.json"  # resolved relative to this TOML
+
+      # cover = "cover.jpg"        # optional; uncomment and provide the file
+
+
+      [metadata]
+
+      title = "My audiobook"
+
+      artist = "An author"
+
+      album = "My audiobook"
+
+
+      [[outputs]]
+
+      format = "mp3"
+
+      bitrate = "192k"
+
+      use_cover = false
+
+      use_chapters = false
+
+
+      [[outputs]]
+
+      format = "flac"
+
+      use_cover = false
+
+      use_chapters = false
+
+
+      [[outputs]]
+
+      format = "m4a"
+
+      bitrate = "192k"
+
+      use_chapters = true
+
+
+      [[outputs]]
+
+      format = "m4b"
+
+      bitrate = "192k"
+
+      use_chapters = true
+
+
+      [[outputs]]
+
+      format = "ogg"
+
+
+      [[outputs]]
+
+      format = "opus"
+
+      bitrate = "96k"
+
+
+      [[outputs]]
+
+      format = "wav"
+
+      ```
+
+
+      When a selector is omitted (`None`), configured global artwork is attached automatically
+      only to MP3/M4A/M4B, and chapters only to M4A/M4B; unsupported formats skip those
+      global resources. `true` requires the resource and a capable format; `false` suppresses
+      it. For example, to enable artwork, set a valid top-level `cover` and `use_cover
+      = true` on the MP3/M4A/M4B rows. Direct `encode()` calls remain strict: unsupported
+      cover/chapter arguments are errors.
+
+
+      `run_profile()` validates every row, resource, capability, and concrete filename
+      collision before the first encode, then returns results in TOML order. Resource
+      paths are relative to the profile file. Explicit `filename` values are literal
+      simple filenames with the matching extension; no template expansion or nested
+      paths are supported. If omitted, each filename uses the input stem. Profile-wide
+      metadata is inherited by every output; there is no per-output metadata override.'
+    links: []
+  - section_id: md:section:README.md::profile-resolution-and-read-only-preflight-api
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - Profile resolution and read-only preflight API
+    heading_slug: profile-resolution-and-read-only-preflight-api
+    line_span:
+      - 208
+      - 245
+    section_hash: ff96bbcad7d696b6006ed91c0d43bc99dce406acf6564bd09b7dff109318f8ab
+    summary: Profile resolution and read-only preflight API
+    text:
+      "## Profile resolution and read-only preflight API\n\nThe `audioexport.profile.v1`\
+      \ `use_cover` and `use_chapters` fields select profile-wide resources for each\
+      \ output. An omitted selector (`None`) uses a configured resource only when the\
+      \ format supports it; `false` suppresses it; `true` requires both a configured\
+      \ resource and a supporting format. Automatic selection is:\n\n| Formats     \
+      \         | Cover by default   | Chapters by default |\n| --------------------\
+      \ | ------------------ | ------------------- |\n| WAV, FLAC, OGG, Opus | No  \
+      \               | No                  |\n| MP3                  | Yes, if configured\
+      \ | No                  |\n| M4A, M4B             | Yes, if configured | Yes,\
+      \ if configured  |\n\n`ResolvedOutput` is an immutable description containing\
+      \ normalized format, literal filename, effective normalized bitrate, and selected\
+      \ cover/timeline paths. Explicit filenames are simple filenames with a matching\
+      \ extension and are never interpolated; only an omitted filename uses the supplied\
+      \ source stem. `resolve_output(profile, spec, source_stem)` is a pure operation\
+      \ on an already-loaded profile and does not probe media or read the TOML again.\n\
+      \nUse `preflight_profile()` when the complete profile must be proven ready before\
+      \ the first output write. It returns the resolved outputs in TOML order, checks\
+      \ the source, metadata, selected resources and chapters, FFmpeg/FFprobe, and only\
+      \ the requested encoders. It does not accept an output directory and creates no\
+      \ outputs, directories, manifests, or temporary files. An unused global resource\
+      \ (for example, a missing cover on a FLAC-only profile) is not validated.\n\n\
+      ```python\nfrom pathlib import Path\nfrom audioexport import encode, load_profile,\
+      \ preflight_profile\n\nsource = Path(\"master.wav\")\nprofile = load_profile(\"\
+      export.toml\")  # Load once.\nresolved_outputs = preflight_profile(profile, source)\n\
+      \nfor resolved in resolved_outputs:\n    target = Path(\"exports\") / resolved.filename\n\
+      \    # A consumer such as Readio performs its target/ownership/overwrite checks\
+      \ here.\n    result = encode(\n        source,\n        target,\n        format=resolved.format,\n\
+      \        bitrate=resolved.bitrate,\n        metadata=profile.metadata,\n     \
+      \   cover=resolved.cover,\n        timeline=resolved.timeline,\n    )\n```\n\n\
+      A consumer may instead call `resolve_output()` for a single selected spec; use\
+      \ full-profile preflight when the operation requires every configured output validated.\
+      \ Preflight is not an ownership authorization: Readio remains responsible for\
+      \ project locks and freshness, destination selection and collision/ownership checks,\
+      \ overwrite authorization, state/index updates, result types, and partial-batch\
+      \ bookkeeping. Call `encode()` only after those consumer-owned checks pass. `ResolvedOutput`,\
+      \ `resolve_output`, and `preflight_profile` are available from both `audioexport`\
+      \ and `audioexport.api`."
+    links: []
+  - section_id: md:section:README.md::chapters-timeline
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - Chapters/timeline
+    heading_slug: chapters-timeline
+    line_span:
+      - 246
+      - 262
+    section_hash: 739097fa8d2953b28f8b51f5c06952f9ef7aade861e0da06df1b4a6ebf3765c6
+    summary: Chapters/timeline
+    text:
+      "## Chapters/timeline\n\nUse an independent JSON file such as [`examples/chapters.json`](examples/chapters.json):\n\
+      \n```json\n{\n  \"chapters\": [\n    { \"title\": \"Intro\", \"start_ms\": 0 },\n\
+      \    { \"title\": \"Part One\", \"start_ms\": 60000 }\n  ]\n}\n```\n\n`end_ms`\
+      \ is optional; without it, chapter ends are the next chapter start or the audio\
+      \ duration. Chapter offsets must be strictly increasing and within the audio file.\
+      \ FFmpeg metadata escaping is handled internally. Embedded chapter markers are\
+      \ currently supported for **M4A and M4B**.\n\nFor an incremental Readio migration,\
+      \ the same `--timeline` API also reads **Readio's `readio.composition-timeline`\
+      \ JSON** with `sample_rate` and chapter `start_sample`. FFmetadata is constructed\
+      \ with its original sample timebase for precision, with generic millisecond chapter\
+      \ fields available for non-Readio workflows."
+    links: []
+  - section_id: md:section:README.md::integrity-and-versioning
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - Integrity and versioning
+    heading_slug: integrity-and-versioning
+    line_span:
+      - 263
+      - 272
+    section_hash: 849d2f23bb6ec293ed37c9555a4ae3c4c1d77f244e4c4972d4e095de41b5afc7
+    summary: Integrity and versioning
+    text: "## Integrity and versioning
+
+
+      `encode()` and `run_profile()` outputs have a sibling sidecar, for example `output.mp3.audioexport.json`,
+      holding `audioexport.manifest.v1`, a SHA-256 export identity, source/output and
+      consumed-resource digests, tool versions, normalized options, chapter mapping,
+      and the probed output summary. `build_audiobook()` uses the same sidecar path
+      with `audioexport.audiobook-manifest.v1`, recording ordered tracks, consumed resources,
+      normalized settings, resolved chapter structure, tools, and verification. Generic
+      export identity is **input-content + relevant options/resources + tools**, not
+      output location or TOML formatting. The original sources are never modified.
+
+
+      Encoding uses argument-vector subprocess calls (`shell=False`) and stages both
+      audio and manifest before committing. The output lock serializes same-target writers
+      across processes; a competing call receives a typed busy error. If a sidecar commit
+      fails, the previous output/manifest are restored when possible. A recovery failure
+      retains its backup and refuses to treat a mismatched sidecar as current; inspect
+      the reported recovery path before retrying. FFprobe validation checks the single
+      audio stream, codec, duration, requested tags/chapters, and cover codec/disposition.
+
+
+      Version is dynamic through `setuptools-scm`: `pyproject.toml` has no static `version`
+      field, and Git tags determine wheel/sdist metadata, `audioexport.__version__`,
+      and CLI output. The project supports Python 3.10+ and retains the flat `audioexport/`
+      layout. Unversioned archives use a development fallback; a fallback build must
+      never be treated as final `0.1.0`.
+
+
+      For a release, first commit the code and wait for the complete Linux/Windows/macOS,
+      Python 3.10/3.13 CI matrix. Then create and push the intended version tag (for
+      example `v0.1.0`). Manually dispatch `.github/workflows/release.yml` with that
+      existing tag. It reruns the test matrix, checks the tag against wheel/sdist metadata,
+      inspects package contents, installs the wheel outside the checkout, and checks
+      CLI/API version parity. Publishing uses PyPI trusted publishing only after the
+      `pypi` GitHub environment is approved; repository administrators must configure
+      required reviewers for that environment and register the trusted publisher on
+      PyPI. Do not publish from an untagged/fallback build."
+    links: []
+  - section_id: md:section:README.md::readio-migration
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - Readio migration
+    heading_slug: readio-migration
+    line_span:
+      - 273
+      - 276
+    section_hash: b711072f4350e835c0e467b2ccaac224d72131ec0ada1355c5337a624d885d92
+    summary: Readio migration
+    text: "## Readio migration
+
+
+      **Readio is deliberately not patched by this project.** Its existing export commands
+      continue using their current code until an opt-in bridge is tested. A future integration
+      must call AudioExport's Python library API; it must never launch the `audioexport`
+      CLI as a subprocess. See [`docs/readio-migration.md`](docs/readio-migration.md)
+      for the compatibility boundary, integration order, and rollback rules. Readio
+      continues owning project locks, path defaults, staleness, indexed state, and orchestration."
+    links: []
+  - section_id: md:section:README.md::tests
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - Tests
+    heading_slug: tests
+    line_span:
+      - 277
+      - 293
+    section_hash: e3e54813c797ab6dd1719925a3cb55f21ee2847f17b7592d1501acf4929e3cb3
+    summary: Tests
+    text: "## Tests
+
+
+      ```bash
+
+      python -m pip install -e '.[dev]'
+
+      python -m pytest -q
+
+      ruff check .
+
+      ruff format --check .
+
+      mypy audioexport
+
+      python -m compileall -q audioexport
+
+      python -m build
+
+      python -m twine check dist/*
+
+      python scripts/check_package_artifacts.py
+
+      audioexport doctor --json
+
+      ```
+
+
+      Tests cover seven real formats in one profile, mixed-format audiobook assembly,
+      100-track ordering/chapters, audiobook cache invalidation, M4A/M4B chapters and
+      covers, Readio sample timelines, malformed probes, encoder availability, transactional
+      failure recovery, no-clobber behavior, and concurrent writers. CI runs Python
+      3.10 and 3.13 on Linux, Windows, and macOS, and checks lint, formatting, typing,
+      build metadata, Twine, package contents, and an isolated wheel install outside
+      the checkout. Cross-platform encoder availability still depends on the FFmpeg
+      build installed by the runner."
+    links: []
+  - section_id: md:section:README.md::limitations-mvp
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - Limitations (MVP)
+    heading_slug: limitations-mvp
+    line_span:
+      - 294
+      - 297
+    section_hash: d5987b5dd0489442f66aeed4c1792168ecfe848951015ccb4822cdd639fd01e6
+    summary: Limitations (MVP)
+    text: "## Limitations (MVP)
+
+
+      No audio mastering, TTS, audio mixing, streaming PCM API, FFmpeg filter graphs,
+      network service, or GUI. No automatic conversion of Readio project configs, legacy
+      export cache, or Audiocompose timeline semantics other than chapter starts. Encoder
+      output may vary across FFmpeg versions; the cache key includes tool versions.
+      Chapter verification has a small tolerance for FFmpeg container timebase rounding.
+      Standalone encoding does not modify Readio projects."
+    links: []
+  - section_id: md:section:README.md::license
+    doc_path: README.md
+    heading_path:
+      - audioexport
+      - License
+    heading_slug: license
+    line_span:
+      - 298
+      - 300
+    section_hash: 2c8319681d56739371dd105d3abaf03789cb1345436ba096822248258b03e7d1
+    summary: License
+    text: "## License
+
+
+      Apache-2.0. The FFmpeg executable is a separate third-party program distributed
+      under its own terms."
+    links: []
+last_fresh_scan_version: 2
+last_fresh_hash: a16e3b1d10aeb8bb3cdd2fa473c938699bc64089bb411f59ba25986ff32b2b7c
+notes:
+  Bootstrap documentation completed after scan version 2; README and Sphinx index
+  are linked, while generated changelog and intentionally omitted internal/test units
+  remain unlinked by review.
+version: 6

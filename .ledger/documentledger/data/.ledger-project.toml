@@ -1,0 +1,6 @@
+schema_version = 1
+layout_version = 3
+project_uuid = "e9a6ddb3-c595-40b8-ad80-714ee80fe7b0"
+tool = "documentledger"
+mount = "data"
+storage = "project"
