@@ -1,6 +1,8 @@
-# Paths for timeline and cover are resolved relative to this TOML file.
+# All resource paths are relative to this TOML file. This profile uses the
+# bundled chapter sample and can export all seven formats in one run.
 schema = "audioexport.profile.v1"
-# timeline = "chapters.json"
+timeline = "chapters.json"
+# Optional: provide this file and uncomment to enable artwork.
 # cover = "cover.jpg"
 
 [metadata]
@@ -11,14 +13,30 @@ album = "Standalone example"
 [[outputs]]
 format = "mp3"
 bitrate = "192k"
+use_cover = false
+use_chapters = false
 
 [[outputs]]
 format = "flac"
+use_cover = false
+use_chapters = false
 
 [[outputs]]
 format = "m4a"
 bitrate = "192k"
+use_chapters = true
+
+[[outputs]]
+format = "m4b"
+bitrate = "192k"
+use_chapters = true
+
+[[outputs]]
+format = "ogg"
 
 [[outputs]]
 format = "opus"
 bitrate = "96k"
+
+[[outputs]]
+format = "wav"

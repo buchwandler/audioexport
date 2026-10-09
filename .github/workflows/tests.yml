@@ -1,5 +1,7 @@
 name: Tests
+
 on: [push, pull_request]
+
 jobs:
   build-and-test:
     strategy:
@@ -11,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # setuptools-scm requires Git tags for dynamic versions.
+          fetch-depth: 0 # setuptools-scm needs Git history and tags.
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -24,7 +26,23 @@ jobs:
       - name: Install FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: brew install ffmpeg
-      - run: python -m pip install -e '.[dev]'
-      - run: python -m pytest -q
-      - run: python -m build
-      - run: audioexport --version
+      - name: Install development environment
+        run: python -m pip install -e '.[dev]'
+      - name: Tests
+        run: python -m pytest -q
+      - name: Ruff
+        run: ruff check .
+      - name: Ruff format
+        run: ruff format --check .
+      - name: Mypy
+        run: mypy audioexport
+      - name: Compile
+        run: python -m compileall -q audioexport
+      - name: Build wheel and sdist
+        run: python -m build
+      - name: Check distributions
+        run: python -m twine check dist/*
+      - name: Inspect artifacts and smoke-test installed wheel outside checkout
+        run: python scripts/check_package_artifacts.py
+      - name: CLI version
+        run: audioexport --version

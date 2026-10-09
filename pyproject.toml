@@ -15,7 +15,7 @@ classifiers = ["Programming Language :: Python :: 3", "Programming Language :: P
 dependencies = ["tomli>=2; python_version < '3.11'"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "build>=1", "mypy>=1.10"]
+dev = ["pytest>=8", "ruff>=0.6", "build>=1", "mypy>=1.10", "twine>=5"]
 
 [project.scripts]
 audioexport = "audioexport.cli:main"
@@ -38,3 +38,10 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+exclude = ["*.md"]
+
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["audioexport"]

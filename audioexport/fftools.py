@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import subprocess
+from collections.abc import Sequence
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Any
 
 from .errors import EncodingError, ToolNotFoundError, VerificationError
-from .formats import FORMATS
+from .formats import FORMATS, normalize_format
 
 
 def executable(name: str, provided: str | Path | None = None) -> str:
@@ -45,6 +49,101 @@ def version(exe: str) -> str:
     return run([exe, "-version"]).stdout.splitlines()[0].strip()
 
 
+def _probe_number(value: Any, field: str, *, allow_zero: bool) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise VerificationError(
+            f"ffprobe returned invalid {field}", code="audioexport.probe_invalid"
+        )
+    try:
+        number = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise VerificationError(
+            f"ffprobe returned invalid {field}", code="audioexport.probe_invalid"
+        ) from exc
+    if not math.isfinite(number) or number < 0 or (not allow_zero and number == 0):
+        raise VerificationError(
+            f"ffprobe returned invalid {field}", code="audioexport.probe_invalid"
+        )
+    return number
+
+
+def _probe_positive_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise VerificationError(
+            f"ffprobe returned invalid {field}", code="audioexport.probe_invalid"
+        )
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise VerificationError(
+            f"ffprobe returned invalid {field}", code="audioexport.probe_invalid"
+        ) from exc
+    if number <= 0 or str(number) != str(value).strip():
+        raise VerificationError(
+            f"ffprobe returned invalid {field}", code="audioexport.probe_invalid"
+        )
+    return number
+
+
+def _validate_tags(value: Any, field: str) -> None:
+    if not isinstance(value, dict) or any(
+        not isinstance(key, str) or not isinstance(tag, str) for key, tag in value.items()
+    ):
+        raise VerificationError(
+            f"ffprobe returned invalid {field}", code="audioexport.probe_invalid"
+        )
+
+
+def _validate_probe_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise VerificationError(
+            "ffprobe returned invalid JSON structure", code="audioexport.probe_invalid"
+        )
+    streams = payload.get("streams")
+    container = payload.get("format")
+    chapters = payload.get("chapters", [])
+    if (
+        not isinstance(streams, list)
+        or not isinstance(container, dict)
+        or not isinstance(chapters, list)
+    ):
+        raise VerificationError(
+            "ffprobe returned invalid JSON structure", code="audioexport.probe_invalid"
+        )
+    if "tags" in container:
+        _validate_tags(container["tags"], "format tags")
+    if container.get("duration") is not None:
+        _probe_number(container["duration"], "format duration", allow_zero=False)
+    has_audio = False
+    for index, stream in enumerate(streams):
+        if not isinstance(stream, dict):
+            raise VerificationError(
+                "ffprobe returned invalid stream", code="audioexport.probe_invalid"
+            )
+        if "tags" in stream:
+            _validate_tags(stream["tags"], f"stream {index} tags")
+        if stream.get("codec_type") == "audio":
+            has_audio = True
+            for field in ("channels", "sample_rate"):
+                if field in stream:
+                    _probe_positive_int(stream[field], f"audio {field}")
+            if stream.get("duration") is not None:
+                _probe_number(stream["duration"], "audio duration", allow_zero=False)
+    for index, chapter in enumerate(chapters):
+        if not isinstance(chapter, dict):
+            raise VerificationError(
+                "ffprobe returned invalid chapter", code="audioexport.probe_invalid"
+            )
+        if "tags" in chapter:
+            _validate_tags(chapter["tags"], f"chapter {index} tags")
+        for field in ("start_time", "end_time"):
+            if field in chapter:
+                _probe_number(chapter[field], f"chapter {field}", allow_zero=True)
+    if not has_audio:
+        raise VerificationError("input has no audio stream", code="audioexport.no_audio")
+    return payload
+
+
 def probe(path: Path | str, ffprobe: str | Path | None = None) -> dict[str, Any]:
     exe = executable("ffprobe", ffprobe)
     text = run(
@@ -62,22 +161,26 @@ def probe(path: Path | str, ffprobe: str | Path | None = None) -> dict[str, Any]
         error_type=VerificationError,
     ).stdout
     try:
-        payload: dict[str, Any] = json.loads(text)
+        payload = json.loads(text)
     except (ValueError, TypeError) as exc:
         raise VerificationError(
             "ffprobe returned invalid JSON", code="audioexport.probe_invalid"
         ) from exc
-    streams = payload.get("streams", [])
-    if not isinstance(streams, list) or not any(
-        row.get("codec_type") == "audio" for row in streams
-    ):
-        raise VerificationError("input has no audio stream", code="audioexport.no_audio")
-    return payload
+    return _validate_probe_payload(payload)
 
 
 def doctor(
-    *, ffmpeg: str | Path | None = None, ffprobe: str | Path | None = None
+    *,
+    ffmpeg: str | Path | None = None,
+    ffprobe: str | Path | None = None,
+    requested_formats: Sequence[str] | None = None,
 ) -> dict[str, Any]:
+    """Report tool availability and encoder capability without exporting media."""
+    requested = (
+        {normalize_format(item) for item in requested_formats}
+        if requested_formats is not None
+        else None
+    )
     tools: dict[str, Any] = {}
     for name, override in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)):
         try:
@@ -87,24 +190,46 @@ def doctor(
             tools[name] = {"available": False, "error": str(exc)}
     ff = tools["ffmpeg"]
     supported: dict[str, Any] = {}
+    encoder_text = ""
+    encoder_error: str | None = None
     if ff["available"]:
         try:
-            encoders = run([ff["path"], "-hide_banner", "-encoders"]).stdout
-            for name, spec in FORMATS.items():
-                supported[name] = {
-                    "encoder": spec.codec,
-                    "available": any(
-                        line.split()[-1:] and line.split()[1:2] == [spec.codec]
-                        for line in encoders.splitlines()
-                        if len(line.split()) >= 2
-                    ),
-                }
-        except EncodingError:
-            supported = {
-                name: {"encoder": spec.codec, "available": None} for name, spec in FORMATS.items()
-            }
+            result = run([ff["path"], "-hide_banner", "-encoders"])
+            encoder_text = result.stdout + "\n" + result.stderr
+        except EncodingError as exc:
+            encoder_error = str(exc)
+    else:
+        encoder_error = "FFmpeg is unavailable"
+    for name, spec in FORMATS.items():
+        available: bool | None = None
+        reason: str | None = None
+        if encoder_error is None:
+            available = any(
+                len(fields := line.split()) >= 2 and fields[1] == spec.codec
+                for line in encoder_text.splitlines()
+            )
+            if not available:
+                reason = f"encoder {spec.codec!r} is not available in this FFmpeg build"
+        else:
+            reason = encoder_error
+        supported[name] = {"encoder": spec.codec, "available": available}
+        if reason is not None:
+            supported[name]["reason"] = reason
+    all_formats_ready = all(item["available"] is True for item in supported.values())
+    requested_formats_ready = (
+        all(supported[name]["available"] is True for name in requested)
+        if requested is not None
+        else None
+    )
+    try:
+        package_version = distribution_version("audioexport")
+    except PackageNotFoundError:
+        package_version = "0+uninstalled"
     return {
+        "package": {"name": "audioexport", "version": package_version},
         "tools": tools,
         "formats": supported,
         "ready": all(x["available"] for x in tools.values()),
+        "all_formats_ready": all_formats_ready,
+        "requested_formats_ready": requested_formats_ready,
     }

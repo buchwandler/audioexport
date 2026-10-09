@@ -1,0 +1,12 @@
+include LICENSE README.md pyproject.toml
+recursive-include audioexport *.py py.typed
+recursive-include docs *.md
+recursive-include examples *.py *.toml *.json
+prune .github
+prune .ledger
+prune tests
+prune audioexport.egg-info
+prune scripts
+exclude .codecrate.toml .gitignore .pre-commit-config.yaml
+global-exclude __pycache__ *.py[cod]
+exclude 01_audioexport.md plan.md plan.revision.md

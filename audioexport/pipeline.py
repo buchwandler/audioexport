@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import json
 import math
 import os
 import re
+import shutil
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
@@ -16,10 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from .chapters import Chapter, ffmetadata_text, load_chapters, normalize_chapters
-from .errors import InvalidExportError, VerificationError
+from .errors import EncodingError, InvalidExportError, VerificationError
+from .fftools import doctor as fftool_doctor
 from .fftools import executable, probe, run, version
 from .formats import EXPECTED_CODECS, FORMATS, normalize_bitrate, normalize_format
-from .profile import load_profile
+from .profile import ExportProfile, ResolvedOutput, load_profile, resolve_output
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,20 +114,159 @@ def _manifest_path(output: Path) -> Path:
     return output.with_name(output.name + ".audioexport.json")
 
 
-def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+def _output_lock_path(output: Path) -> Path:
+    owner = str(os.getuid()) if hasattr(os, "getuid") else getpass.getuser()
+    owner_key = hashlib.sha256(owner.encode("utf-8")).hexdigest()[:16]
+    root = Path(tempfile.gettempdir()) / f"audioexport-locks-{owner_key}"
+    if root.is_symlink():
+        raise EncodingError(
+            "output lock directory must not be a symlink", code="audioexport.output_lock_failed"
+        )
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise EncodingError(
+            "could not create output lock directory", code="audioexport.output_lock_failed"
+        ) from exc
+    if root.is_symlink() or not root.is_dir():
+        raise EncodingError(
+            "output lock directory is invalid", code="audioexport.output_lock_failed"
+        )
+    key = os.path.normcase(str(output.resolve()))
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return root / f"{digest}.lock"
+
+
+@contextmanager
+def _output_lock(output: Path) -> Iterator[None]:
+    lock_path = _output_lock_path(output)
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise EncodingError(
+            f"another audioexport operation holds {lock_path}; verify no writer is active "
+            "before removing a stale lock",
+            code="audioexport.output_busy",
+        ) from exc
+    except OSError as exc:
+        raise EncodingError(
+            "could not acquire output lock", code="audioexport.output_lock_failed"
+        ) from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps({"pid": os.getpid(), "output": str(output.absolute())}) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        yield
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
+def _write_json_temp(path: Path, payload: Mapping[str, Any]) -> Path:
     data = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(name, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary
+
+
+def _backup_existing(path: Path) -> Path | None:
+    if path.is_symlink():
+        raise InvalidExportError(
+            f"refusing to replace symlink artifact: {path}", code="audioexport.output_invalid"
+        )
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise InvalidExportError(
+            f"artifact must be a regular file: {path}", code="audioexport.output_invalid"
+        )
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".backup", dir=path.parent)
+    os.close(fd)
+    backup = Path(name)
+    backup.unlink()
+    try:
+        link_file = getattr(os, "link", None)
+        if link_file is None:
+            shutil.copy2(path, backup)
+        else:
+            try:
+                link_file(path, backup)
+            except (OSError, NotImplementedError):
+                shutil.copy2(path, backup)
+    except BaseException:
+        backup.unlink(missing_ok=True)
+        raise
+    return backup
+
+
+def _commit_export(
+    audio_temp: Path,
+    output: Path,
+    sidecar: Path,
+    manifest: Mapping[str, Any],
+) -> None:
+    try:
+        manifest_temp = _write_json_temp(sidecar, manifest)
+    except OSError as exc:
+        raise EncodingError(
+            "could not stage export manifest", code="audioexport.manifest_write_failed"
+        ) from exc
+    audio_backup: Path | None = None
+    manifest_backup: Path | None = None
+    preserved_backups: list[Path] = []
+    try:
+        audio_backup = _backup_existing(output)
+        manifest_backup = _backup_existing(sidecar)
+        try:
+            os.replace(audio_temp, output)
+        except OSError as exc:
+            raise EncodingError(
+                "could not commit encoded audio", code="audioexport.output_commit_failed"
+            ) from exc
+        try:
+            os.replace(manifest_temp, sidecar)
+        except OSError as exc:
+            rollback_errors = []
+            for target, backup in ((output, audio_backup), (sidecar, manifest_backup)):
+                try:
+                    if backup is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        os.replace(backup, target)
+                except OSError as rollback_exc:
+                    rollback_errors.append(rollback_exc)
+                    if backup is not None and backup.exists():
+                        preserved_backups.append(backup)
+            if rollback_errors:
+                raise EncodingError(
+                    "manifest commit failed and automatic recovery was incomplete; "
+                    f"preserved backups: {', '.join(map(str, preserved_backups)) or 'none'}. "
+                    f"Inspect {output} and {sidecar} before retrying",
+                    code="audioexport.commit_recovery_failed",
+                ) from exc
+            raise EncodingError(
+                "manifest commit failed; the previous export was restored",
+                code="audioexport.manifest_commit_failed",
+            ) from exc
     finally:
-        Path(name).unlink(missing_ok=True)
+        manifest_temp.unlink(missing_ok=True)
+        if audio_backup is not None and audio_backup not in preserved_backups:
+            audio_backup.unlink(missing_ok=True)
+        if manifest_backup is not None and manifest_backup not in preserved_backups:
+            manifest_backup.unlink(missing_ok=True)
 
 
 def _load_manifest(path: Path) -> dict[str, Any] | None:
+    if path.is_symlink():
+        return None
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return (
@@ -141,18 +284,32 @@ def _verify_output(
     fmt: str,
     chapters: Sequence[Chapter],
     cover: Path | None,
+    metadata: Mapping[str, str],
     ffprobe: str,
     source_duration_ms: int,
 ) -> dict[str, Any]:
     info = probe(path, ffprobe)
     streams = info["streams"]
-    audio = next(item for item in streams if item.get("codec_type") == "audio")
+    audio_streams = [item for item in streams if item.get("codec_type") == "audio"]
+    if len(audio_streams) != 1:
+        raise VerificationError(
+            "encoded output must contain exactly one audio stream",
+            code="audioexport.stream_mismatch",
+        )
+    audio = audio_streams[0]
     if audio.get("codec_name") != EXPECTED_CODECS[fmt]:
         raise VerificationError(
             f"expected {EXPECTED_CODECS[fmt]} output, found {audio.get('codec_name')}",
             code="audioexport.codec_mismatch",
         )
-    if int(audio.get("channels", 0)) <= 0 or int(audio.get("sample_rate", 0)) <= 0:
+    try:
+        channels = int(audio["channels"])
+        sample_rate = int(audio["sample_rate"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise VerificationError(
+            "encoded output lacks valid channels/sample rate", code="audioexport.probe_invalid"
+        ) from exc
+    if channels <= 0 or sample_rate <= 0:
         raise VerificationError(
             "encoded output lacks valid channels/sample rate", code="audioexport.probe_invalid"
         )
@@ -162,34 +319,66 @@ def _verify_output(
             "encoded duration differs substantially from source",
             code="audioexport.duration_mismatch",
         )
+    format_tags = info["format"].get("tags", {})
+    normalized_tags = {key.lower(): value for key, value in format_tags.items()}
+    for stream in audio_streams:
+        normalized_tags.update(
+            {key.lower(): value for key, value in stream.get("tags", {}).items()}
+        )
+    for key, expected_value in metadata.items():
+        candidates = ("artist", "author") if key.lower() in {"artist", "author"} else (key.lower(),)
+        if not any(normalized_tags.get(candidate) == expected_value for candidate in candidates):
+            raise VerificationError(
+                f"encoded metadata tag {key!r} does not match requested value",
+                code="audioexport.metadata_mismatch",
+            )
     emitted = info.get("chapters", [])
     if chapters:
         if len(emitted) != len(chapters):
             raise VerificationError(
                 "encoded chapter count mismatch", code="audioexport.chapter_mismatch"
             )
-        for actual, expected in zip(emitted, chapters):
-            if abs(float(actual.get("start_time", -100)) * 1000 - expected.start_ms) > 30:
+        for actual, expected_chapter in zip(emitted, chapters):
+            try:
+                start_ms = float(actual["start_time"]) * 1000
+                end_ms = float(actual["end_time"]) * 1000
+            except (KeyError, TypeError, ValueError) as exc:
+                raise VerificationError(
+                    "encoded chapter timing is invalid", code="audioexport.chapter_mismatch"
+                ) from exc
+            if abs(start_ms - expected_chapter.start_ms) > 30:
                 raise VerificationError(
                     "encoded chapter start mismatch", code="audioexport.chapter_mismatch"
                 )
-            if abs(float(actual.get("end_time", -100)) * 1000 - expected.end_ms) > 35:
+            if expected_chapter.end_ms is None or abs(end_ms - expected_chapter.end_ms) > 35:
                 raise VerificationError(
                     "encoded chapter end mismatch", code="audioexport.chapter_mismatch"
                 )
-            if actual.get("tags", {}).get("title") != expected.title:
+            actual_tags = {key.lower(): value for key, value in actual.get("tags", {}).items()}
+            if actual_tags.get("title") != expected_chapter.title:
                 raise VerificationError(
                     "encoded chapter title mismatch", code="audioexport.chapter_mismatch"
                 )
-    if cover is not None and not any(
-        item.get("codec_type") == "video" and item.get("disposition", {}).get("attached_pic") == 1
+    pictures = [
+        item
         for item in streams
-    ):
-        raise VerificationError("encoded cover art is missing", code="audioexport.cover_mismatch")
+        if item.get("codec_type") == "video"
+        and item.get("disposition", {}).get("attached_pic") == 1
+    ]
+    if cover is not None:
+        if len(pictures) != 1 or pictures[0].get("codec_name") != _cover_kind(cover):
+            raise VerificationError(
+                "encoded cover art is missing or has the wrong codec",
+                code="audioexport.cover_mismatch",
+            )
+    elif pictures:
+        raise VerificationError(
+            "encoded output contains unexpected cover art", code="audioexport.cover_mismatch"
+        )
     return info
 
 
-def encode(
+def _encode_unlocked(
     source: Path | str,
     output: Path | str,
     *,
@@ -276,6 +465,17 @@ def encode(
         }
     )
     sidecar = _manifest_path(dest)
+    if dest.is_symlink():
+        raise InvalidExportError(
+            "refusing to replace symlink output", code="audioexport.output_invalid"
+        )
+    if sidecar.is_symlink() or (sidecar.exists() and not sidecar.is_file()):
+        raise InvalidExportError(
+            "manifest sidecar must be a regular non-symlink file",
+            code="audioexport.output_invalid",
+        )
+    if dest.exists() and not dest.is_file():
+        raise InvalidExportError("output must be a regular file", code="audioexport.output_invalid")
     old = _load_manifest(sidecar)
     intact = dest.is_file() and old is not None and old.get("output_sha256") == sha256_file(dest)
     if dest.exists() and not force and not intact:
@@ -293,8 +493,6 @@ def encode(
             True,
             len(resolved_chapters),
         )
-    if dest.exists() and not dest.is_file():
-        raise InvalidExportError("output must be a regular file", code="audioexport.output_invalid")
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(
         prefix=f".{dest.stem}.", suffix=spec.extension, dir=dest.parent
@@ -363,11 +561,11 @@ def encode(
             fmt=fmt,
             chapters=resolved_chapters,
             cover=artwork,
+            metadata=tags,
             ffprobe=ffprobe_exe,
             source_duration_ms=duration_ms,
         )
         output_sha = sha256_file(temporary)
-        os.replace(temporary, dest)
         payload = {
             "schema": "audioexport.manifest.v1",
             "schema_version": 1,
@@ -388,7 +586,7 @@ def encode(
                 "chapters": len(info.get("chapters", [])),
             },
         }
-        _write_json_atomic(sidecar, payload)
+        _commit_export(temporary, dest, sidecar, payload)
         return ExportResult(
             dest,
             fmt,
@@ -405,6 +603,97 @@ def encode(
             meta_path.unlink(missing_ok=True)
 
 
+def encode(
+    source: Path | str,
+    output: Path | str,
+    *,
+    format: str | None = None,
+    bitrate: str | int | None = None,
+    metadata: Mapping[str, str] | None = None,
+    cover: Path | str | None = None,
+    timeline: Path | str | None = None,
+    chapters: Sequence[Chapter] | None = None,
+    force: bool = False,
+    ffmpeg: Path | str | None = None,
+    ffprobe: Path | str | None = None,
+) -> ExportResult:
+    """Encode under a per-output inter-process lock and verify the final artifacts."""
+    destination = Path(output).expanduser().absolute()
+    with _output_lock(destination):
+        return _encode_unlocked(
+            source,
+            output,
+            format=format,
+            bitrate=bitrate,
+            metadata=metadata,
+            cover=cover,
+            timeline=timeline,
+            chapters=chapters,
+            force=force,
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+        )
+
+
+def _preflight_profile(
+    profile: ExportProfile,
+    source: Path | str,
+    out_dir: Path,
+    *,
+    ffprobe: Path | str | None,
+    ffmpeg: Path | str | None,
+) -> tuple[tuple[ResolvedOutput, Path], ...]:
+    """Resolve and validate every profile output before any encoder can write."""
+    src = Path(source).expanduser().absolute()
+    if not src.is_file():
+        raise InvalidExportError(f"source audio missing: {src}", code="audioexport.source_missing")
+    source_real = src.resolve()
+    seen_names: set[str] = set()
+    planned: list[tuple[ResolvedOutput, Path]] = []
+    checked_timeline: Path | None = None
+    for spec in profile.outputs:
+        resolved = resolve_output(profile, spec, src.stem)
+        key = resolved.filename.casefold()
+        if key in seen_names:
+            raise InvalidExportError(
+                "duplicate profile output filenames", code="audioexport.profile_invalid"
+            )
+        seen_names.add(key)
+        destination = out_dir / resolved.filename
+        if destination.resolve() == source_real:
+            raise InvalidExportError(
+                "input and output must be different files", code="audioexport.same_path"
+            )
+        if resolved.cover is not None:
+            _cover_kind(resolved.cover)
+        if resolved.timeline is not None and resolved.timeline != checked_timeline:
+            chapters = load_chapters(resolved.timeline)
+            source_info = probe(src, ffprobe)
+            normalize_chapters(chapters, _duration_ms(source_info))
+            checked_timeline = resolved.timeline
+        planned.append((resolved, destination))
+    formats = tuple(spec.format for spec in profile.outputs)
+    capabilities = fftool_doctor(ffmpeg=ffmpeg, ffprobe=ffprobe, requested_formats=formats)
+    for name, override in (("ffmpeg", ffmpeg), ("ffprobe", ffprobe)):
+        if not capabilities["tools"][name]["available"]:
+            executable(name, override)
+            raise EncodingError(
+                f"{name} is not ready: {capabilities['tools'][name].get('error', 'unavailable')}",
+                code="audioexport.tool_failed",
+            )
+    if not capabilities["requested_formats_ready"]:
+        unavailable = [
+            f"{fmt}: {capabilities['formats'][fmt].get('reason', 'encoder unavailable')}"
+            for fmt in formats
+            if capabilities["formats"][fmt]["available"] is not True
+        ]
+        raise EncodingError(
+            "required FFmpeg encoders unavailable: " + "; ".join(unavailable),
+            code="audioexport.encoder_unavailable",
+        )
+    return tuple(planned)
+
+
 def run_profile(
     source: Path | str,
     profile: Path | str,
@@ -417,18 +706,17 @@ def run_profile(
     """Batch-export an ordinary audio file using a portable TOML export profile."""
     configuration = load_profile(profile)
     root = Path(out_dir).expanduser().absolute()
-    stem = Path(source).stem
+    planned = _preflight_profile(configuration, source, root, ffprobe=ffprobe, ffmpeg=ffmpeg)
     outputs = []
-    for item in configuration.outputs:
-        filename = item.filename or f"{stem}{FORMATS[item.format].extension}"
+    for item, destination in planned:
         result = encode(
             source,
-            root / filename,
+            destination,
             format=item.format,
             bitrate=item.bitrate,
             metadata=configuration.metadata,
-            cover=configuration.cover,
-            timeline=configuration.timeline,
+            cover=item.cover,
+            timeline=item.timeline,
             force=force,
             ffmpeg=ffmpeg,
             ffprobe=ffprobe,
