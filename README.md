@@ -6,7 +6,7 @@ Supported formats: WAV (PCM16), FLAC, MP3, M4A (AAC), M4B (AAC audiobook), OGG (
 
 ## Install
 
-Requirements: **Python 3.10+** and external **FFmpeg + FFprobe** executables available on `PATH`. Install a build containing the encoders you need: `pcm_s16le`, `flac`, `libmp3lame`, `aac`, `libvorbis`, and/or `libopus`.
+Requirements: **Python 3.10+** and external **FFmpeg + FFprobe** executables available on `PATH`. Install a build containing the encoders you need: `pcm_s16le`, `flac`, `libmp3lame`, `aac`, `libvorbis` (or native `vorbis`), and/or `libopus`.
 
 Platform notes:
 

@@ -169,6 +169,34 @@ def probe(path: Path | str, ffprobe: str | Path | None = None) -> dict[str, Any]
     return _validate_probe_payload(payload)
 
 
+def encoder_for_format(fmt: str, ffmpeg: str | Path | None = None) -> str:
+    """Return the preferred available encoder for a format."""
+    normalized = normalize_format(fmt)
+    exe = executable("ffmpeg", ffmpeg)
+    result = run([exe, "-hide_banner", "-encoders"])
+    encoder_names = {
+        fields[1]
+        for line in (result.stdout + "\n" + result.stderr).splitlines()
+        if len(fields := line.split()) >= 2
+    }
+    spec = FORMATS[normalized]
+    selected = next(
+        (
+            candidate
+            for candidate in (spec.codec, *spec.fallback_codecs)
+            if candidate in encoder_names
+        ),
+        None,
+    )
+    if selected is None:
+        candidates = ", ".join(repr(candidate) for candidate in (spec.codec, *spec.fallback_codecs))
+        raise EncodingError(
+            f"required FFmpeg encoders unavailable: {normalized}: encoders {candidates} are not available in this FFmpeg build",
+            code="audioexport.encoder_unavailable",
+        )
+    return selected
+
+
 def doctor(
     *,
     ffmpeg: str | Path | None = None,
@@ -204,15 +232,30 @@ def doctor(
         available: bool | None = None
         reason: str | None = None
         if encoder_error is None:
-            available = any(
-                len(fields := line.split()) >= 2 and fields[1] == spec.codec
-                for line in encoder_text.splitlines()
+            encoder_names = {
+                fields[1] for line in encoder_text.splitlines() if len(fields := line.split()) >= 2
+            }
+            selected = next(
+                (
+                    candidate
+                    for candidate in (spec.codec, *spec.fallback_codecs)
+                    if candidate in encoder_names
+                ),
+                None,
             )
+            available = selected is not None
             if not available:
-                reason = f"encoder {spec.codec!r} is not available in this FFmpeg build"
+                candidates = ", ".join(
+                    repr(candidate) for candidate in (spec.codec, *spec.fallback_codecs)
+                )
+                reason = f"encoders {candidates} are not available in this FFmpeg build"
         else:
+            selected = None
             reason = encoder_error
-        supported[name] = {"encoder": spec.codec, "available": available}
+        supported[name] = {
+            "encoder": selected or spec.codec,
+            "available": available,
+        }
         if reason is not None:
             supported[name]["reason"] = reason
     all_formats_ready = all(item["available"] is True for item in supported.values())

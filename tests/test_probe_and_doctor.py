@@ -100,6 +100,23 @@ def test_doctor_reports_missing_encoder_and_selected_readiness(
     assert result["package"]["version"]
 
 
+def test_doctor_uses_native_vorbis_when_libvorbis_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fftools, "executable", lambda name, provided=None: name)
+    monkeypatch.setattr(fftools, "version", lambda exe: f"{exe} test version")
+
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, 0, stdout="Encoders:\n A..... vorbis\n", stderr="")
+
+    monkeypatch.setattr(fftools, "run", fake_run)
+    result = fftools.doctor(requested_formats=("ogg",))
+
+    assert result["requested_formats_ready"] is True
+    assert result["formats"]["ogg"]["available"] is True
+    assert result["formats"]["ogg"]["encoder"] == "vorbis"
+
+
 def test_profile_encoder_failure_is_preflighted_before_output(
     tmp_path: Path, wav: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

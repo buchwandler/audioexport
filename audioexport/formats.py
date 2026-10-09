@@ -15,6 +15,7 @@ class FormatSpec:
     muxer: str
     default_bitrate: str | None = None
     extra_args: tuple[str, ...] = ()
+    fallback_codecs: tuple[str, ...] = ()
 
 
 FORMATS: dict[str, FormatSpec] = {
@@ -23,7 +24,9 @@ FORMATS: dict[str, FormatSpec] = {
     "mp3": FormatSpec(".mp3", "libmp3lame", "mp3", "192k", ("-id3v2_version", "3")),
     "m4a": FormatSpec(".m4a", "aac", "ipod", "192k", ("-movflags", "+faststart")),
     "m4b": FormatSpec(".m4b", "aac", "ipod", "192k", ("-movflags", "+faststart")),
-    "ogg": FormatSpec(".ogg", "libvorbis", "ogg"),
+    # Some packaged FFmpeg builds omit the optional libvorbis encoder but
+    # retain FFmpeg's native Vorbis encoder.
+    "ogg": FormatSpec(".ogg", "libvorbis", "ogg", fallback_codecs=("vorbis",)),
     "opus": FormatSpec(".opus", "libopus", "opus", "96k"),
 }
 
