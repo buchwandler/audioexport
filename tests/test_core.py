@@ -12,7 +12,7 @@ from audioexport.chapters import (
     load_chapters,
     normalize_chapters,
 )
-from audioexport.formats import FORMATS
+from audioexport.formats import FORMATS, encoder_options
 
 
 def test_bitrate_and_escape() -> None:
@@ -24,6 +24,11 @@ def test_bitrate_and_escape() -> None:
         normalize_bitrate("192k", "wav")
     with pytest.raises(InvalidExportError):
         normalize_bitrate("1;rm -rf /", "mp3")
+
+
+def test_native_vorbis_encoder_options() -> None:
+    assert encoder_options("vorbis") == ("-strict", "-2", "-ac", "2")
+    assert encoder_options("libvorbis") == ()
 
 
 def test_timeline_and_chapters(tmp_path: Path) -> None:

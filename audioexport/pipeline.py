@@ -22,7 +22,7 @@ from .chapters import Chapter, ffmetadata_text, load_chapters, normalize_chapter
 from .errors import EncodingError, InvalidExportError, VerificationError
 from .fftools import doctor as fftool_doctor
 from .fftools import encoder_for_format, executable, probe, run, version
-from .formats import EXPECTED_CODECS, FORMATS, normalize_bitrate, normalize_format
+from .formats import EXPECTED_CODECS, FORMATS, encoder_options, normalize_bitrate, normalize_format
 from .profile import ExportProfile, ResolvedOutput, load_profile, resolve_output
 
 
@@ -445,9 +445,11 @@ def _encode_unlocked(
     timeline_sha = sha256_file(Path(timeline)) if timeline is not None else None
     spec = FORMATS[fmt]
     codec = encoder_for_format(fmt, ffmpeg_exe)
+    codec_args = encoder_options(codec)
     options = {
         "format": fmt,
         "codec": codec,
+        "codec_args": codec_args,
         "bitrate": rate,
         "metadata": tags,
         "cover_sha256": cover_sha,
@@ -548,7 +550,7 @@ def _encode_unlocked(
                 command.extend(
                     ["-metadata:s:v", "title=Album cover", "-metadata:s:v", "comment=Cover (front)"]
                 )
-        command.extend(["-c:a", codec])
+        command.extend(["-c:a", codec, *codec_args])
         if rate is not None:
             command.extend(["-b:a", rate])
         elif fmt == "ogg":

@@ -51,6 +51,14 @@ def normalize_format(name: str) -> str:
     return name
 
 
+def encoder_options(codec: str) -> tuple[str, ...]:
+    """Return FFmpeg options required by a selected encoder."""
+    if codec == "vorbis":
+        # FFmpeg's native Vorbis encoder is experimental and only accepts stereo.
+        return ("-strict", "-2", "-ac", "2")
+    return ()
+
+
 def normalize_bitrate(value: str | int | None, fmt: str) -> str | None:
     fmt = normalize_format(fmt)
     if value is None:
