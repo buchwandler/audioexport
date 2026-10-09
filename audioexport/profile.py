@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
@@ -10,10 +11,10 @@ from typing import Any
 from .errors import InvalidExportError
 from .formats import FORMATS, normalize_bitrate, normalize_format
 
-try:
+if sys.version_info >= (3, 11):
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10
-    import tomli as tomllib  # type: ignore[no-redef, import-not-found]
+else:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
 
 
 @dataclass(frozen=True, slots=True)
