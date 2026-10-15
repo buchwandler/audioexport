@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -173,3 +174,129 @@ def test_cli_audiobook_profile_overrides_metadata_and_output(
     tags = {key.lower(): value for key, value in info["format"].get("tags", {}).items()}
     assert tags["title"] == "Profile title"
     assert tags["artist"] == "CLI author"
+
+
+def _book_fixture(tmp_path: Path, wav: Path) -> tuple[Path, str]:
+    variant = "narration2--3b5f647f8f57"
+    workspace = tmp_path / "Platform Decay.ssmdbook"
+    chapters_dir = workspace / "chapters"
+    chapters_dir.mkdir(parents=True)
+    variant_dir = workspace / "audiocompose" / variant
+    variant_dir.mkdir(parents=True)
+    chapters = [
+        {"id": "chapter-five", "source_number": 5, "title": "Chapter Five"},
+        {"id": "chapter-two", "source_number": 2, "title": "Chapter Two"},
+    ]
+    (workspace / "manifest.json").write_text(
+        json.dumps(
+            {
+                "metadata": {"title": "Platform Decay", "authors": ["Martha Wells"]},
+                "chapters": chapters,
+            }
+        ),
+        encoding="utf-8",
+    )
+    items = []
+    for chapter in reversed(chapters):
+        filename = f"chapter-{chapter['source_number']:04}.wav"
+        artifact = variant_dir / filename
+        shutil.copy2(wav, artifact)
+        items.append(
+            {
+                "status": "written",
+                "id": chapter["id"],
+                "source_number": chapter["source_number"],
+                "render_plan_id": f"plan-{chapter['source_number']}",
+                "manifest_id": "fixture-manifest",
+                "output": filename,
+                "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "sample_rate": 24000,
+                "channels": 1,
+                "frames": 48000,
+                "duration_seconds": 2.0,
+                "output_policy_id": "wav-policy",
+            }
+        )
+    report = [
+        'format = "audiocompose-book-report"',
+        "version = 1",
+        f"variant = {json.dumps(variant)}",
+        "",
+    ]
+    for item in items:
+        report.append("[[items]]")
+        report.extend(f"{key} = {json.dumps(value)}" for key, value in item.items())
+        report.append("")
+    (variant_dir / "compose-report.toml").write_text("\n".join(report), encoding="utf-8")
+    return workspace, variant
+
+
+def test_cli_export_book_end_to_end_json_human_reuse_and_force(
+    wav: Path, tmp_path: Path, have_tools: None
+) -> None:
+    workspace, variant = _book_fixture(tmp_path, wav)
+    arguments = (
+        "export-book",
+        str(workspace),
+        "--variant",
+        variant,
+        "--title",
+        "CLI title",
+        "--author",
+        "CLI author",
+        "--bitrate",
+        "96k",
+        "--sample-rate",
+        "24000",
+        "--channels",
+        "1",
+    )
+    first = _run(*arguments, "--json")
+    assert first.returncode == 0, first.stderr
+    result = json.loads(first.stdout)
+    output = workspace / "audioexport" / variant / "Platform Decay.m4b"
+    assert result["workspace"] == str(workspace)
+    assert result["variant"] == variant
+    assert result["selected_chapters"] == ["chapter-five", "chapter-two"]
+    assert result["input_compose_report"] == str(
+        workspace / "audiocompose" / variant / "compose-report.toml"
+    )
+    assert result["output"] == str(output)
+    assert result["export_identity"]
+    assert result["duration_ms"] > 0
+    assert result["codec"] == "aac"
+    assert result["sample_rate"] == 24000
+    assert result["channels"] == 1
+    assert result["reused"] is False
+    assert Path(result["sidecar"]).is_file()
+
+    inspected = json.loads(_run("inspect", str(output), "--json").stdout)
+    assert inspected["chapters"][0]["tags"]["title"] == "Chapter Five"
+    assert inspected["chapters"][1]["tags"]["title"] == "Chapter Two"
+    audio = next(stream for stream in inspected["streams"] if stream["codec_type"] == "audio")
+    assert audio["codec_name"] == "aac"
+    tags = {key.lower(): value for key, value in inspected["format"].get("tags", {}).items()}
+    assert tags["title"] == "CLI title"
+    assert tags["artist"] == "CLI author"
+
+    repeated = _run(*arguments, "--json")
+    assert repeated.returncode == 0, repeated.stderr
+    assert json.loads(repeated.stdout)["reused"] is True
+
+    human = _run(*arguments)
+    assert human.returncode == 0, human.stderr
+    for expected in (
+        "workspace:",
+        "variant:",
+        "selected chapters:",
+        "input compose report:",
+        "export identity:",
+        "duration:",
+        "codec/sample-rate/channels:",
+        "reused: yes",
+    ):
+        assert expected in human.stdout
+
+    forced = _run(*arguments, "--force", "--json")
+    assert forced.returncode == 0, forced.stderr
+    assert json.loads(forced.stdout)["reused"] is False

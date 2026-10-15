@@ -12,6 +12,7 @@ from typing import Any
 from . import __version__
 from .audiobook import build_audiobook
 from .audiobook_profile import load_audiobook_profile, resolve_profile_overrides
+from .book import export_book
 from .errors import AudioExportError
 from .fftools import doctor, probe
 from .formats import FORMATS
@@ -86,6 +87,39 @@ def _parser() -> argparse.ArgumentParser:
     audiobook.add_argument("--json", action="store_true")
     audiobook.add_argument("--ffmpeg")
     audiobook.add_argument("--ffprobe")
+
+
+    export_book_parser = sub.add_parser(
+        "export-book", help="Export a composed .ssmdbook variant as one M4B audiobook"
+    )
+    export_book_parser.add_argument("book", type=Path)
+    export_book_parser.add_argument("--variant", required=True)
+    export_book_parser.add_argument("--chapters", default="all", metavar="SELECTOR")
+    export_book_parser.add_argument("-o", "--output", type=Path)
+    export_book_parser.add_argument("--profile", type=Path)
+    export_book_parser.add_argument("--bitrate")
+    export_book_parser.add_argument("--sample-rate", type=int)
+    export_book_parser.add_argument("--channels", type=int, choices=(1, 2))
+    export_book_parser.add_argument("--title")
+    export_book_parser.add_argument("--author", "--artist", dest="author")
+    export_book_parser.add_argument("--album")
+    export_book_parser.add_argument("--album-artist")
+    export_book_parser.add_argument("--writer")
+    export_book_parser.add_argument("--genre")
+    export_book_parser.add_argument("--description")
+    export_book_parser.add_argument("--long-description")
+    export_book_parser.add_argument("--comment")
+    export_book_parser.add_argument("--copyright")
+    export_book_parser.add_argument("--encoded-by")
+    export_book_parser.add_argument("--language")
+    export_book_parser.add_argument("--publisher")
+    export_book_parser.add_argument("--grouping")
+    export_book_parser.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
+    export_book_parser.add_argument("--cover", type=Path)
+    export_book_parser.add_argument("--force", action="store_true")
+    export_book_parser.add_argument("--json", action="store_true")
+    export_book_parser.add_argument("--ffmpeg")
+    export_book_parser.add_argument("--ffprobe")
     inspect = sub.add_parser("inspect", help="Inspect audio and audioexport sidecar")
     inspect.add_argument("input", type=Path)
     inspect.add_argument("--json", action="store_true")
@@ -103,6 +137,25 @@ def _print(payload: Any, *, as_json: bool) -> None:
     else:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
 
+
+
+
+def _print_book_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        _print(payload, as_json=True)
+        return
+    print(f"workspace: {payload['workspace']}")
+    print(f"variant: {payload['variant']}")
+    print(f"selected chapters: {', '.join(payload['selected_chapters'])}")
+    print(f"input compose report: {payload['input_compose_report']}")
+    print(f"output: {payload['output']}")
+    print(f"export identity: {payload['export_identity']}")
+    print(f"duration: {payload['duration_seconds']:.3f} s")
+    print(
+        "codec/sample-rate/channels: "
+        f"{payload['codec']}/{payload['sample_rate']} Hz/{payload['channels']}"
+    )
+    print(f"reused: {'yes' if payload['reused'] else 'no'}")
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
@@ -161,6 +214,82 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ffprobe=args.ffprobe,
             )
             _print([item.to_dict() for item in results], as_json=args.json)
+            return 0
+        if args.command == "export-book":
+            book_metadata_values: dict[str, str] = {}
+            for item in args.metadata:
+                if "=" not in item:
+                    raise AudioExportError(
+                        "--metadata requires KEY=VALUE",
+                        code="audioexport.audiobook_metadata_invalid",
+                    )
+                key, value = item.split("=", 1)
+                book_metadata_values[key] = value
+            for field in (
+                "title",
+                "author",
+                "album",
+                "album_artist",
+                "writer",
+                "genre",
+                "description",
+                "long_description",
+                "comment",
+                "copyright",
+                "encoded_by",
+                "language",
+                "publisher",
+                "grouping",
+            ):
+                value = getattr(args, field)
+                if value is not None:
+                    book_metadata_values[field] = value
+
+            book_result = export_book(
+                args.book,
+                variant=args.variant,
+                chapters=args.chapters,
+                output=args.output,
+                profile=args.profile,
+                metadata=book_metadata_values,
+                cover=args.cover,
+                bitrate=args.bitrate,
+                sample_rate=args.sample_rate,
+                channels=args.channels,
+                force=args.force,
+                ffmpeg=args.ffmpeg,
+                ffprobe=args.ffprobe,
+            )
+            try:
+                sidecar_payload = json.loads(book_result.sidecar.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise AudioExportError(
+                    f"could not read audiobook verification sidecar: {exc}",
+                    code="audioexport.audiobook_manifest_invalid",
+                ) from exc
+            verified = sidecar_payload.get("verified", {}) if isinstance(sidecar_payload, Mapping) else {}
+            if not isinstance(verified, Mapping):
+                verified = {}
+            duration_ms = book_result.audiobook.duration_ms
+            payload = {
+                "workspace": str(book_result.workspace),
+                "variant": book_result.variant,
+                "selected_chapters": list(book_result.selected_chapter_ids),
+                "selected_chapter_ids": list(book_result.selected_chapter_ids),
+                "input_compose_report": str(
+                    book_result.workspace / "audiocompose" / book_result.variant / "compose-report.toml"
+                ),
+                "output": str(book_result.output),
+                "sidecar": str(book_result.sidecar),
+                "export_identity": book_result.audiobook.export_id,
+                "duration_ms": duration_ms,
+                "duration_seconds": duration_ms / 1000,
+                "codec": book_result.audiobook.codec,
+                "sample_rate": verified.get("sample_rate"),
+                "channels": verified.get("channels"),
+                "reused": book_result.audiobook.reused,
+            }
+            _print_book_export(payload, as_json=args.json)
             return 0
         if args.command == "audiobook":
             metadata_values: dict[str, str] = {}

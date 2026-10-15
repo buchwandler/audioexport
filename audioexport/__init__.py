@@ -6,6 +6,13 @@ from importlib.metadata import PackageNotFoundError, version
 
 from .audiobook import AudiobookResult, AudiobookTrack, build_audiobook
 from .audiobook_profile import AudiobookAudioOptions, AudiobookProfile, load_audiobook_profile
+from .book import (
+    BookExportContext,
+    BookExportResult,
+    ComposedChapter,
+    export_book,
+    resolve_book_export,
+)
 from .chapters import Chapter, load_chapters
 from .errors import (
     AudioExportError,
@@ -34,7 +41,10 @@ __all__ = [
     "AudiobookProfile",
     "AudiobookResult",
     "AudiobookTrack",
+    "BookExportContext",
+    "BookExportResult",
     "Chapter",
+    "ComposedChapter",
     "EncodingError",
     "ExportProfile",
     "ExportResult",
@@ -47,12 +57,14 @@ __all__ = [
     "build_audiobook",
     "doctor",
     "encode",
+    "export_book",
     "load_audiobook_profile",
     "load_chapters",
     "load_profile",
     "normalize_bitrate",
     "preflight_profile",
     "probe",
+    "resolve_book_export",
     "resolve_output",
     "run_profile",
 ]

@@ -116,6 +116,22 @@ mode = "explicit"       # tracks | explicit | none
 
 Run it with `audioexport audiobook --profile audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file` override profile values; the TOML input order remains authoritative. `mode = "tracks"` (the default) creates one chapter per track; `mode = "explicit"` requires `chapters_file`; `mode = "none"` disables chapters. Existing `encode(..., format="m4b", timeline=...)` remains the right choice for Readio's prepared master and project timeline.
 
+
+## Native `.ssmdbook` pipeline
+
+Use `export-book` when AudioCompose has already written a variant in a standard `.ssmdbook` workspace. It is the native book-workspace adapter; `audioexport audiobook` remains the generic standalone track/directory assembler, and `encode` remains for one prepared source with a timeline.
+
+```bash
+audiocompose compose-book . --variant "$VARIANT"
+audioexport export-book . --variant "$VARIANT"
+```
+
+`export-book` reads `manifest.json` and `audiocompose/<variant>/compose-report.toml`, checks the selected report entries and WAV checksums/geometry, then delegates final M4B assembly and verification to AudioExport. It does not run AudioCompose, repair or synthesize chapters, or use Readio-specific state. Chapter selection accepts `all` (the default), a source number, an inclusive range, or comma-separated source numbers/ranges, for example `--chapters 5,7,11-13`. Selection follows manifest chapter order.
+
+By default, output is written to `audioexport/<variant>/<workspace-name-without-.ssmdbook>.m4b` in the workspace. `--output` may override this; when an audiobook profile is supplied, its output is used unless `--output` is specified.
+
+Metadata precedence is **manifest metadata < audiobook profile metadata < explicit CLI/API metadata**. Audio settings use **AudioExport defaults < audiobook profile < explicit CLI/API flags**. Thus explicit metadata fields replace matching profile/manifest values, profile values replace manifest defaults, and unset values continue to fall through. Explicit cover and audio flags override corresponding profile settings. The profile's inputs and chapter configuration do not replace the variant chapters selected from the compose report.
+
 If `--output` is not set for `encode`, the output filename defaults to the input stem and chosen format. To avoid destroying the input, encoding input and output to the same real path is always rejected.
 
 Without `--force`, an untracked, symlink, or manually modified output is never overwritten. A previously generated output is updated when its sidecar and checksum still match; re-running identical options returns `reused: true` without re-encoding. `--force` authorizes replacing an unknown or modified regular file, but symlink outputs and sidecars are always rejected. Writes are staged with their manifest; a failed manifest commit restores the last good pair when possible, and an incomplete recovery reports the preserved backup path. A per-target process lock rejects concurrent writers with `audioexport.output_busy`; remove a stale lock only after confirming no writer is active.
