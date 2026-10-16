@@ -1,0 +1,1510 @@
+ README.md               |  16 ++
+ audioexport/__init__.py |  12 +
+ audioexport/book.py     | 729 ++++++++++++++++++++++++++++++++++++++++++++++++
+ audioexport/cli.py      | 129 +++++++++
+ tests/test_book.py      | 388 ++++++++++++++++++++++++++
+ tests/test_cli.py       | 127 +++++++++
+ 6 files changed, 1401 insertions(+)
+
+diff --git a/README.md b/README.md
+index f8e24ba..c4400ec 100644
+--- a/README.md
++++ b/README.md
+@@ -116,6 +116,22 @@ mode = "explicit"       # tracks | explicit | none
+
+ Run it with `audioexport audiobook --profile audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file` override profile values; the TOML input order remains authoritative. `mode = "tracks"` (the default) creates one chapter per track; `mode = "explicit"` requires `chapters_file`; `mode = "none"` disables chapters. Existing `encode(..., format="m4b", timeline=...)` remains the right choice for Readio's prepared master and project timeline.
+
++
++## Native `.ssmdbook` pipeline
++
++Use `export-book` when AudioCompose has already written a variant in a standard `.ssmdbook` workspace. It is the native book-workspace adapter; `audioexport audiobook` remains the generic standalone track/directory assembler, and `encode` remains for one prepared source with a timeline.
++
++```bash
++audiocompose compose-book . --variant "$VARIANT"
++audioexport export-book . --variant "$VARIANT"
++```
++
++`export-book` reads `manifest.json` and `audiocompose/<variant>/compose-report.toml`, checks the selected report entries and WAV checksums/geometry, then delegates final M4B assembly and verification to AudioExport. It does not run AudioCompose, repair or synthesize chapters, or use Readio-specific state. Chapter selection accepts `all` (the default), a source number, an inclusive range, or comma-separated source numbers/ranges, for example `--chapters 5,7,11-13`. Selection follows manifest chapter order.
++
++By default, output is written to `audioexport/<variant>/<workspace-name-without-.ssmdbook>.m4b` in the workspace. `--output` may override this; when an audiobook profile is supplied, its output is used unless `--output` is specified.
++
++Metadata precedence is **manifest metadata < audiobook profile metadata < explicit CLI/API metadata**. Audio settings use **AudioExport defaults < audiobook profile < explicit CLI/API flags**. Thus explicit metadata fields replace matching profile/manifest values, profile values replace manifest defaults, and unset values continue to fall through. Explicit cover and audio flags override corresponding profile settings. The profile's inputs and chapter configuration do not replace the variant chapters selected from the compose report.
++
+ If `--output` is not set for `encode`, the output filename defaults to the input stem and chosen format. To avoid destroying the input, encoding input and output to the same real path is always rejected.
+
+ Without `--force`, an untracked, symlink, or manually modified output is never overwritten. A previously generated output is updated when its sidecar and checksum still match; re-running identical options returns `reused: true` without re-encoding. `--force` authorizes replacing an unknown or modified regular file, but symlink outputs and sidecars are always rejected. Writes are staged with their manifest; a failed manifest commit restores the last good pair when possible, and an incomplete recovery reports the preserved backup path. A per-target process lock rejects concurrent writers with `audioexport.output_busy`; remove a stale lock only after confirming no writer is active.
+diff --git a/audioexport/__init__.py b/audioexport/__init__.py
+index 51b48f8..5f1a494 100644
+--- a/audioexport/__init__.py
++++ b/audioexport/__init__.py
+@@ -6,6 +6,13 @@ from importlib.metadata import PackageNotFoundError, version
+
+ from .audiobook import AudiobookResult, AudiobookTrack, build_audiobook
+ from .audiobook_profile import AudiobookAudioOptions, AudiobookProfile, load_audiobook_profile
++from .book import (
++    BookExportContext,
++    BookExportResult,
++    ComposedChapter,
++    export_book,
++    resolve_book_export,
++)
+ from .chapters import Chapter, load_chapters
+ from .errors import (
+     AudioExportError,
+@@ -34,7 +41,10 @@ __all__ = [
+     "AudiobookProfile",
+     "AudiobookResult",
+     "AudiobookTrack",
++    "BookExportContext",
++    "BookExportResult",
+     "Chapter",
++    "ComposedChapter",
+     "EncodingError",
+     "ExportProfile",
+     "ExportResult",
+@@ -47,12 +57,14 @@ __all__ = [
+     "build_audiobook",
+     "doctor",
+     "encode",
++    "export_book",
+     "load_audiobook_profile",
+     "load_chapters",
+     "load_profile",
+     "normalize_bitrate",
+     "preflight_profile",
+     "probe",
++    "resolve_book_export",
+     "resolve_output",
+     "run_profile",
+ ]
+diff --git a/audioexport/book.py b/audioexport/book.py
+new file mode 100644
+index 0000000..969b54a
+--- /dev/null
++++ b/audioexport/book.py
+@@ -0,0 +1,729 @@
++"""Safe adapter from a composed ``.ssmdbook`` workspace to audiobook export.
++
++The AudioCompose report is treated as a filesystem hand-off contract. AudioExport
++validates selected WAV files and then delegates assembly to ``build_audiobook``.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++import math
++import os
++import re
++import stat
++import sys
++import wave
++from collections.abc import Mapping
++from dataclasses import dataclass
++from pathlib import Path, PureWindowsPath
++from typing import Any
++
++if sys.version_info >= (3, 11):
++    import tomllib
++else:  # pragma: no cover - Python 3.10
++    import tomli as tomllib
++
++from .audiobook import AudiobookResult, AudiobookTrack, build_audiobook
++from .audiobook_profile import AudiobookProfile, load_audiobook_profile
++from .errors import InvalidExportError, VerificationError
++from .metadata import AudiobookMetadata, audiobook_tags
++
++_DURATION_TOLERANCE_SECONDS = 0.01
++_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
++
++
++@dataclass(frozen=True, slots=True)
++class ComposedChapter:
++    """A manifest chapter joined to a verified AudioCompose output."""
++
++    id: str
++    source_number: int
++    title: str
++    path: Path
++    sha256: str
++    sample_rate: int
++    channels: int
++    frames: int
++    duration_seconds: float
++    render_plan_id: str
++    manifest_id: str
++
++
++@dataclass(frozen=True, slots=True)
++class BookExportContext:
++    """Resolved inputs for exporting selected chapters from one book variant."""
++
++    workspace: Path
++    variant: str
++    manifest_path: Path
++    compose_report_path: Path
++    chapters: tuple[ComposedChapter, ...]
++    default_output: Path
++
++
++@dataclass(frozen=True, slots=True)
++class BookExportResult:
++    """Result of a variant-aware book export."""
++
++    workspace: Path
++    variant: str
++    selected_chapter_ids: tuple[str, ...]
++    output: Path
++    sidecar: Path
++    audiobook: AudiobookResult
++
++
++def _fail(message: str, *, code: str = "audioexport.book_invalid") -> InvalidExportError:
++    return InvalidExportError(message, code=code)
++
++
++def _duplicate_checked_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
++    result: dict[str, Any] = {}
++    for key, value in pairs:
++        if key in result:
++            raise ValueError(f"duplicate JSON key {key!r}")
++        result[key] = value
++    return result
++
++
++def _read_manifest(path: Path) -> Mapping[str, Any]:
++    if path.is_symlink() or not path.is_file():
++        raise _fail(f"manifest.json must be a regular non-symlink file: {path}")
++    try:
++        payload = json.loads(
++            path.read_text(encoding="utf-8"), object_pairs_hook=_duplicate_checked_object
++        )
++    except (OSError, UnicodeDecodeError, ValueError) as exc:
++        raise _fail(f"cannot read book manifest: {exc}", code="audioexport.book_manifest_invalid") from exc
++    if not isinstance(payload, Mapping):
++        raise _fail("book manifest must be a JSON object", code="audioexport.book_manifest_invalid")
++    return payload
++
++
++def _nonempty_string(value: Any, field: str, *, code: str) -> str:
++    if not isinstance(value, str) or not value.strip() or "\x00" in value:
++        raise _fail(f"{field} must be a non-empty string", code=code)
++    return value.strip()
++
++
++def _positive_int(value: Any, field: str, *, code: str) -> int:
++    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
++        raise _fail(f"{field} must be a positive integer", code=code)
++    return value
++
++
++def _manifest_chapters(payload: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:
++    raw_chapters = payload.get("chapters")
++    if not isinstance(raw_chapters, list) or not raw_chapters:
++        raise _fail(
++            "book manifest must contain a non-empty chapters array",
++            code="audioexport.book_manifest_invalid",
++        )
++    chapters: list[dict[str, Any]] = []
++    ids: set[str] = set()
++    source_numbers: set[int] = set()
++    for index, raw in enumerate(raw_chapters, 1):
++        if not isinstance(raw, Mapping):
++            raise _fail(
++                f"manifest chapter {index} must be an object",
++                code="audioexport.book_manifest_invalid",
++            )
++        chapter_id = _nonempty_string(
++            raw.get("id"), f"manifest chapter {index} id", code="audioexport.book_manifest_invalid"
++        )
++        source_number = _positive_int(
++            raw.get("source_number"),
++            f"manifest chapter {index} source_number",
++            code="audioexport.book_manifest_invalid",
++        )
++        title = _nonempty_string(
++            raw.get("title"),
++            f"manifest chapter {index} title",
++            code="audioexport.book_manifest_invalid",
++        )
++        if chapter_id in ids:
++            raise _fail(
++                f"duplicate manifest chapter id: {chapter_id}",
++                code="audioexport.book_manifest_invalid",
++            )
++        if source_number in source_numbers:
++            raise _fail(
++                f"duplicate manifest source number: {source_number}",
++                code="audioexport.book_manifest_invalid",
++            )
++        ids.add(chapter_id)
++        source_numbers.add(source_number)
++        chapters.append({"id": chapter_id, "source_number": source_number, "title": title})
++    return tuple(chapters)
++
++
++def _validate_metadata(payload: Mapping[str, Any]) -> None:
++    metadata = payload.get("metadata", {})
++    if not isinstance(metadata, Mapping):
++        raise _fail("manifest metadata must be an object", code="audioexport.book_manifest_invalid")
++    if "title" in metadata and metadata["title"] is not None:
++        _nonempty_string(metadata["title"], "manifest metadata.title", code="audioexport.book_manifest_invalid")
++    if "publisher" in metadata and metadata["publisher"] is not None:
++        _nonempty_string(
++            metadata["publisher"], "manifest metadata.publisher", code="audioexport.book_manifest_invalid"
++        )
++    if "language" in metadata and metadata["language"] is not None:
++        _nonempty_string(
++            metadata["language"], "manifest metadata.language", code="audioexport.book_manifest_invalid"
++        )
++    if "authors" in metadata and metadata["authors"] is not None:
++        authors = metadata["authors"]
++        if not isinstance(authors, list) or any(
++            not isinstance(author, str) or not author.strip() for author in authors
++        ):
++            raise _fail(
++                "manifest metadata.authors must be an array of non-empty strings",
++                code="audioexport.book_manifest_invalid",
++            )
++
++
++def _safe_variant(variant: str) -> str:
++    if not isinstance(variant, str) or not variant or variant in {".", ".."}:
++        raise _fail("variant must be a safe single directory component", code="audioexport.book_variant_invalid")
++    if (
++        "/" in variant
++        or "\\" in variant
++        or "\x00" in variant
++        or ":" in variant
++        or PureWindowsPath(variant).is_absolute()
++        or any(ord(character) < 32 for character in variant)
++    ):
++        raise _fail("variant must be a safe single directory component", code="audioexport.book_variant_invalid")
++    return variant
++
++
++def _workspace_for(book: str | Path) -> Path:
++    if not isinstance(book, (str, Path)):
++        raise _fail("book must be a path", code="audioexport.book_workspace_invalid")
++    candidate = Path(book).expanduser()
++    try:
++        resolved = candidate.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise _fail(
++            f"book path does not exist or cannot be resolved: {candidate}",
++            code="audioexport.book_workspace_invalid",
++        ) from exc
++    start = resolved if resolved.is_dir() else resolved.parent
++    for directory in (start, *start.parents):
++        manifest = directory / "manifest.json"
++        chapters = directory / "chapters"
++        if manifest.exists() or chapters.exists():
++            if (
++                directory.is_dir()
++                and not chapters.is_symlink()
++                and chapters.is_dir()
++                and not manifest.is_symlink()
++                and manifest.is_file()
++            ):
++                return directory
++            raise _fail(
++                f"invalid .ssmdbook workspace at {directory}: expected manifest.json and chapters/",
++                code="audioexport.book_workspace_invalid",
++            )
++    raise _fail(
++        f"could not find a .ssmdbook workspace containing manifest.json and chapters/ from {candidate}",
++        code="audioexport.book_workspace_invalid",
++    )
++
++
++def _report_root(workspace: Path, audiocompose_root: str | Path | None) -> Path:
++    root = Path(audiocompose_root).expanduser() if audiocompose_root is not None else workspace / "audiocompose"
++    if not root.is_absolute():
++        root = workspace / root
++    try:
++        resolved = root.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise _fail(
++            f"AudioCompose directory does not exist: {root}",
++            code="audioexport.book_compose_report_missing",
++        ) from exc
++    if not resolved.is_dir() or root.is_symlink():
++        raise _fail(
++            f"AudioCompose root must be a non-symlink directory: {root}",
++            code="audioexport.book_compose_report_invalid",
++        )
++    return resolved
++
++
++def _safe_report_file(variant_dir: Path, reported: Any) -> Path:
++    if not isinstance(reported, str) or not reported or "\x00" in reported or "\\" in reported:
++        raise VerificationError(
++            "compose report output must be a relative POSIX path",
++            code="audioexport.book_compose_output_invalid",
++        )
++    relative = Path(reported)
++    windows = PureWindowsPath(reported)
++    if relative.is_absolute() or windows.is_absolute() or windows.drive:
++        raise VerificationError(
++            "compose report output must be relative to its variant directory",
++            code="audioexport.book_compose_output_invalid",
++        )
++    if any(part in {"", ".", ".."} for part in reported.split("/")):
++        raise VerificationError(
++            "compose report output must not contain traversal components",
++            code="audioexport.book_compose_output_invalid",
++        )
++    candidate = variant_dir / relative
++    current = variant_dir
++    try:
++        for part in relative.parts:
++            current = current / part
++            if current.is_symlink():
++                raise VerificationError(
++                    "compose report output must not traverse symlinks",
++                    code="audioexport.book_compose_output_invalid",
++                )
++        resolved = candidate.resolve(strict=True)
++    except VerificationError:
++        raise
++    except (OSError, RuntimeError) as exc:
++        raise VerificationError(
++            f"compose report output does not resolve to a regular file: {reported}",
++            code="audioexport.book_compose_output_invalid",
++        ) from exc
++    try:
++        if os.path.commonpath((str(variant_dir), str(resolved))) != str(variant_dir):
++            raise VerificationError(
++                "compose report output escapes its variant directory",
++                code="audioexport.book_compose_output_invalid",
++            )
++    except ValueError as exc:
++        raise VerificationError(
++            "compose report output is outside its variant directory",
++            code="audioexport.book_compose_output_invalid",
++        ) from exc
++    try:
++        mode = resolved.lstat().st_mode
++    except OSError as exc:
++        raise VerificationError(
++            f"compose report output is unavailable: {reported}",
++            code="audioexport.book_compose_output_invalid",
++        ) from exc
++    if not stat.S_ISREG(mode):
++        raise VerificationError(
++            f"compose report output must be a regular non-symlink file: {reported}",
++            code="audioexport.book_compose_output_invalid",
++        )
++    return resolved
++
++
++def _sha256(path: Path) -> str:
++    digest = hashlib.sha256()
++    try:
++        with path.open("rb") as stream:
++            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
++                digest.update(chunk)
++    except OSError as exc:
++        raise VerificationError(
++            f"cannot hash composed WAV {path}", code="audioexport.book_compose_hash_mismatch"
++        ) from exc
++    return digest.hexdigest()
++
++
++def _verify_wav(path: Path, item: Mapping[str, Any]) -> tuple[int, int, int, float]:
++    expected_rate = _positive_int(
++        item.get("sample_rate"), "compose item sample_rate", code="audioexport.book_compose_report_invalid"
++    )
++    expected_channels = _positive_int(
++        item.get("channels"), "compose item channels", code="audioexport.book_compose_report_invalid"
++    )
++    expected_frames = _positive_int(
++        item.get("frames"), "compose item frames", code="audioexport.book_compose_report_invalid"
++    )
++    duration = item.get("duration_seconds")
++    if (
++        isinstance(duration, bool)
++        or not isinstance(duration, (int, float))
++        or not math.isfinite(float(duration))
++        or duration <= 0
++    ):
++        raise _fail(
++            "compose item duration_seconds must be a positive finite number",
++            code="audioexport.book_compose_report_invalid",
++        )
++    try:
++        with wave.open(str(path), "rb") as source:
++            actual_rate = source.getframerate()
++            actual_channels = source.getnchannels()
++            actual_frames = source.getnframes()
++    except (OSError, EOFError, wave.Error) as exc:
++        raise VerificationError(
++            f"composed artifact is not a readable WAV file: {path}",
++            code="audioexport.book_compose_geometry_mismatch",
++        ) from exc
++    actual_duration = actual_frames / actual_rate if actual_rate > 0 else 0.0
++    if (
++        actual_rate != expected_rate
++        or actual_channels != expected_channels
++        or actual_frames != expected_frames
++        or abs(actual_duration - float(duration)) > _DURATION_TOLERANCE_SECONDS
++    ):
++        raise VerificationError(
++            f"composed WAV geometry does not match the report: {path}",
++            code="audioexport.book_compose_geometry_mismatch",
++        )
++    return actual_rate, actual_channels, actual_frames, actual_duration
++
++
++def _read_compose_report(path: Path, requested_variant: str) -> tuple[Mapping[str, Any], ...]:
++    if path.is_symlink() or not path.is_file():
++        raise _fail(
++            f"compose report must be a regular non-symlink file: {path}",
++            code="audioexport.book_compose_report_missing",
++        )
++    try:
++        with path.open("rb") as stream:
++            payload = tomllib.load(stream)
++    except (OSError, tomllib.TOMLDecodeError) as exc:
++        raise _fail(
++            f"cannot parse compose report: {exc}", code="audioexport.book_compose_report_invalid"
++        ) from exc
++    if (
++        not isinstance(payload, Mapping)
++        or payload.get("format") != "audiocompose-book-report"
++        or payload.get("version") != 1
++        or isinstance(payload.get("version"), bool)
++        or payload.get("variant") != requested_variant
++    ):
++        raise _fail(
++            "compose report format, version, or variant does not match the requested export",
++            code="audioexport.book_compose_report_invalid",
++        )
++    items = payload.get("items")
++    if not isinstance(items, list):
++        raise _fail(
++            "compose report must contain an items array",
++            code="audioexport.book_compose_report_invalid",
++        )
++    seen_ids: set[str] = set()
++    seen_numbers: set[int] = set()
++    normalized: list[Mapping[str, Any]] = []
++    for index, raw in enumerate(items, 1):
++        if not isinstance(raw, Mapping):
++            raise _fail(
++                f"compose report item {index} must be a table",
++                code="audioexport.book_compose_report_invalid",
++            )
++        item_id = _nonempty_string(
++            raw.get("id"), f"compose report item {index} id", code="audioexport.book_compose_report_invalid"
++        )
++        source_number = _positive_int(
++            raw.get("source_number"),
++            f"compose report item {index} source_number",
++            code="audioexport.book_compose_report_invalid",
++        )
++        status = _nonempty_string(
++            raw.get("status"),
++            f"compose report item {index} status",
++            code="audioexport.book_compose_report_invalid",
++        )
++        if status not in {"written", "reused", "failed", "skipped", "missing"}:
++            raise _fail(
++                f"unsupported compose report item status: {status}",
++                code="audioexport.book_compose_report_invalid",
++            )
++        if item_id in seen_ids:
++            raise _fail(
++                f"duplicate compose report item id: {item_id}",
++                code="audioexport.book_compose_report_invalid",
++            )
++        if source_number in seen_numbers:
++            raise _fail(
++                f"duplicate compose report source number: {source_number}",
++                code="audioexport.book_compose_report_invalid",
++            )
++        seen_ids.add(item_id)
++        seen_numbers.add(source_number)
++        normalized.append(raw)
++    return tuple(normalized)
++
++
++def _select_chapters(chapters: tuple[dict[str, Any], ...], selector: str) -> tuple[dict[str, Any], ...]:
++    if not isinstance(selector, str) or not selector.strip():
++        raise _fail("chapter selector must be a non-empty string", code="audioexport.book_chapters_invalid")
++    selector = selector.strip()
++    by_number = {chapter["source_number"]: chapter for chapter in chapters}
++    if selector == "all":
++        return chapters
++    selected: set[int] = set()
++    for component in selector.split(","):
++        component = component.strip()
++        if not component:
++            raise _fail("chapter selector contains an empty item", code="audioexport.book_chapters_invalid")
++        match = re.fullmatch(r"([1-9][0-9]*)(?:-([1-9][0-9]*))?", component)
++        if match is None:
++            raise _fail(
++                f"invalid chapter selector item: {component}", code="audioexport.book_chapters_invalid"
++            )
++        start = int(match.group(1))
++        end = int(match.group(2) or start)
++        if end < start:
++            raise _fail(
++                f"chapter range ends before it starts: {component}",
++                code="audioexport.book_chapters_invalid",
++            )
++        chosen = [number for number in by_number if start <= number <= end]
++        if not chosen:
++            raise _fail(
++                f"chapter selector does not match a source number: {component}",
++                code="audioexport.book_chapters_invalid",
++            )
++        selected.update(chosen)
++    return tuple(chapter for chapter in chapters if chapter["source_number"] in selected)
++
++
++def resolve_book_export(
++    book: str | Path,
++    *,
++    variant: str,
++    chapters: str = "all",
++    audiocompose_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++) -> BookExportContext:
++    """Resolve and verify selected composed chapters from a ``.ssmdbook`` workspace.
++
++    Reported WAV duration is compared with frame-derived duration using a fixed
++    0.01-second tolerance to account for decimal serialization precision.
++    """
++    safe_variant = _safe_variant(variant)
++    workspace = _workspace_for(book)
++    manifest_path = workspace / "manifest.json"
++    manifest = _read_manifest(manifest_path)
++    _validate_metadata(manifest)
++    manifest_chapters = _manifest_chapters(manifest)
++    selected = _select_chapters(manifest_chapters, chapters)
++
++    compose_root = _report_root(workspace, audiocompose_root)
++    variant_dir = compose_root / safe_variant
++    if variant_dir.is_symlink():
++        raise _fail(
++            "compose variant directory must not be a symlink",
++            code="audioexport.book_compose_report_invalid",
++        )
++    try:
++        resolved_variant = variant_dir.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise _fail(
++            f"unknown AudioCompose variant: {safe_variant}",
++            code="audioexport.book_compose_report_missing",
++        ) from exc
++    if not resolved_variant.is_dir() or os.path.commonpath((str(compose_root), str(resolved_variant))) != str(compose_root):
++        raise _fail(
++            "compose variant directory escapes the AudioCompose root",
++            code="audioexport.book_compose_report_invalid",
++        )
++    report_path = resolved_variant / "compose-report.toml"
++    items = _read_compose_report(report_path, safe_variant)
++    item_by_id = {item["id"]: item for item in items}
++    item_by_number = {item["source_number"]: item for item in items}
++
++    composed: list[ComposedChapter] = []
++    for chapter in selected:
++        item = item_by_id.get(chapter["id"])
++        if item is None:
++            raise _fail(
++                f"compose report is missing selected chapter id {chapter['id']}",
++                code="audioexport.book_compose_item_missing",
++            )
++        if item.get("source_number") != chapter["source_number"] or item_by_number.get(
++            chapter["source_number"]
++        ) is not item:
++            raise _fail(
++                f"compose report identity does not match manifest chapter {chapter['id']}",
++                code="audioexport.book_compose_report_invalid",
++            )
++        if item["status"] not in {"written", "reused"}:
++            raise _fail(
++                f"selected chapter {chapter['id']} has unusable compose status {item['status']!r}",
++                code="audioexport.book_compose_item_unusable",
++            )
++        for required in ("render_plan_id", "manifest_id", "output_policy_id"):
++            _nonempty_string(
++                item.get(required),
++                f"compose item {chapter['id']} {required}",
++                code="audioexport.book_compose_report_invalid",
++            )
++        expected_hash = item.get("sha256")
++        if not isinstance(expected_hash, str) or _SHA256_RE.fullmatch(expected_hash) is None:
++            raise _fail(
++                f"compose item {chapter['id']} has an invalid sha256",
++                code="audioexport.book_compose_report_invalid",
++            )
++        path = _safe_report_file(resolved_variant, item.get("output"))
++        actual_hash = _sha256(path)
++        if actual_hash.casefold() != expected_hash.casefold():
++            raise VerificationError(
++                f"composed WAV checksum does not match the report: {path}",
++                code="audioexport.book_compose_hash_mismatch",
++            )
++        rate, channels, frames, duration = _verify_wav(path, item)
++        composed.append(
++            ComposedChapter(
++                id=chapter["id"],
++                source_number=chapter["source_number"],
++                title=chapter["title"],
++                path=path,
++                sha256=actual_hash,
++                sample_rate=rate,
++                channels=channels,
++                frames=frames,
++                duration_seconds=duration,
++                render_plan_id=str(item["render_plan_id"]),
++                manifest_id=str(item["manifest_id"]),
++            )
++        )
++    name = workspace.name
++    if name.casefold().endswith(".ssmdbook"):
++        name = name[: -len(".ssmdbook")]
++    if not name:
++        name = "book"
++    base_output = Path(output_root).expanduser() if output_root is not None else workspace / "audioexport"
++    if not base_output.is_absolute():
++        base_output = Path.cwd() / base_output
++    default_output = base_output.absolute() / safe_variant / f"{name}.m4b"
++    return BookExportContext(
++        workspace=workspace,
++        variant=safe_variant,
++        manifest_path=manifest_path,
++        compose_report_path=report_path,
++        chapters=tuple(composed),
++        default_output=default_output,
++    )
++
++
++_MANIFEST_METADATA_FIELDS = (
++    "title",
++    "author",
++    "album",
++    "album_artist",
++    "writer",
++    "genre",
++    "description",
++    "long_description",
++    "comment",
++    "copyright",
++    "encoded_by",
++    "language",
++    "publisher",
++    "grouping",
++)
++
++
++def _resolved_metadata(
++    manifest: Mapping[str, Any],
++    profile: AudiobookProfile | None,
++    overrides: AudiobookMetadata | Mapping[str, str] | None,
++) -> AudiobookMetadata:
++    metadata = manifest.get("metadata", {})
++    authors = metadata.get("authors") or []
++    values: dict[str, str | None] = {
++        "title": metadata.get("title"),
++        "author": ", ".join(authors) if authors else None,
++        "publisher": metadata.get("publisher"),
++        "language": metadata.get("language"),
++    }
++    extras: dict[str, str] = {}
++    if profile is not None:
++        for name in _MANIFEST_METADATA_FIELDS:
++            value = getattr(profile.metadata, name)
++            if value is not None:
++                values[name] = value
++        extras.update(profile.metadata.extra)
++    if isinstance(overrides, AudiobookMetadata):
++        for name in _MANIFEST_METADATA_FIELDS:
++            value = getattr(overrides, name)
++            if value is not None:
++                values[name] = value
++        extras.update(overrides.extra)
++    elif overrides is not None:
++        if not isinstance(overrides, Mapping):
++            raise _fail("metadata must be AudiobookMetadata or a string mapping", code="audioexport.audiobook_metadata_invalid")
++        for key, value in overrides.items():
++            if not isinstance(key, str) or not isinstance(value, str):
++                raise _fail(
++                    "metadata overrides must contain string keys and values",
++                    code="audioexport.audiobook_metadata_invalid",
++                )
++            if key in _MANIFEST_METADATA_FIELDS:
++                values[key] = value
++            else:
++                extras[key] = value
++    result = AudiobookMetadata(**values, extra=extras)
++    audiobook_tags(result)
++    return result
++
++
++def export_book(
++    book: str | Path,
++    *,
++    variant: str,
++    chapters: str = "all",
++    output: str | Path | None = None,
++    profile: str | Path | None = None,
++    metadata: AudiobookMetadata | Mapping[str, str] | None = None,
++    cover: str | Path | None = None,
++    bitrate: str | int | None = None,
++    sample_rate: int | None = None,
++    channels: int | None = None,
++    force: bool = False,
++    ffmpeg: str | Path | None = None,
++    ffprobe: str | Path | None = None,
++) -> BookExportResult:
++    """Export selected chapters from a composed variant to a verified M4B."""
++    context = resolve_book_export(book, variant=variant, chapters=chapters)
++    audiobook_profile = load_audiobook_profile(profile) if profile is not None else None
++    manifest = _read_manifest(context.manifest_path)
++    resolved_metadata = _resolved_metadata(manifest, audiobook_profile, metadata)
++
++    destination = (
++        Path(output).expanduser().absolute()
++        if output is not None
++        else audiobook_profile.output
++        if audiobook_profile is not None
++        else context.default_output
++    )
++    resolved_cover = (
++        Path(cover).expanduser()
++        if cover is not None
++        else audiobook_profile.cover
++        if audiobook_profile is not None
++        else None
++    )
++    effective_bitrate = bitrate
++    effective_sample_rate = sample_rate
++    effective_channels = channels
++    if audiobook_profile is not None:
++        if effective_bitrate is None:
++            effective_bitrate = audiobook_profile.audio.bitrate
++        if effective_sample_rate is None:
++            effective_sample_rate = audiobook_profile.audio.sample_rate
++        if effective_channels is None:
++            effective_channels = audiobook_profile.audio.channels
++
++    tracks = tuple(AudiobookTrack(chapter.path, title=chapter.title) for chapter in context.chapters)
++    audiobook = build_audiobook(
++        tracks,
++        destination,
++        metadata=resolved_metadata,
++        cover=resolved_cover,
++        bitrate=effective_bitrate,
++        sample_rate=effective_sample_rate,
++        channels=effective_channels,
++        force=force,
++        ffmpeg=ffmpeg,
++        ffprobe=ffprobe,
++    )
++    return BookExportResult(
++        workspace=context.workspace,
++        variant=context.variant,
++        selected_chapter_ids=tuple(chapter.id for chapter in context.chapters),
++        output=audiobook.path,
++        sidecar=audiobook.manifest_path,
++        audiobook=audiobook,
++    )
+diff --git a/audioexport/cli.py b/audioexport/cli.py
+index 777fb9e..f1f28db 100644
+--- a/audioexport/cli.py
++++ b/audioexport/cli.py
+@@ -12,6 +12,7 @@ from typing import Any
+ from . import __version__
+ from .audiobook import build_audiobook
+ from .audiobook_profile import load_audiobook_profile, resolve_profile_overrides
++from .book import export_book
+ from .errors import AudioExportError
+ from .fftools import doctor, probe
+ from .formats import FORMATS
+@@ -86,6 +87,39 @@ def _parser() -> argparse.ArgumentParser:
+     audiobook.add_argument("--json", action="store_true")
+     audiobook.add_argument("--ffmpeg")
+     audiobook.add_argument("--ffprobe")
++
++
++    export_book_parser = sub.add_parser(
++        "export-book", help="Export a composed .ssmdbook variant as one M4B audiobook"
++    )
++    export_book_parser.add_argument("book", type=Path)
++    export_book_parser.add_argument("--variant", required=True)
++    export_book_parser.add_argument("--chapters", default="all", metavar="SELECTOR")
++    export_book_parser.add_argument("-o", "--output", type=Path)
++    export_book_parser.add_argument("--profile", type=Path)
++    export_book_parser.add_argument("--bitrate")
++    export_book_parser.add_argument("--sample-rate", type=int)
++    export_book_parser.add_argument("--channels", type=int, choices=(1, 2))
++    export_book_parser.add_argument("--title")
++    export_book_parser.add_argument("--author", "--artist", dest="author")
++    export_book_parser.add_argument("--album")
++    export_book_parser.add_argument("--album-artist")
++    export_book_parser.add_argument("--writer")
++    export_book_parser.add_argument("--genre")
++    export_book_parser.add_argument("--description")
++    export_book_parser.add_argument("--long-description")
++    export_book_parser.add_argument("--comment")
++    export_book_parser.add_argument("--copyright")
++    export_book_parser.add_argument("--encoded-by")
++    export_book_parser.add_argument("--language")
++    export_book_parser.add_argument("--publisher")
++    export_book_parser.add_argument("--grouping")
++    export_book_parser.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
++    export_book_parser.add_argument("--cover", type=Path)
++    export_book_parser.add_argument("--force", action="store_true")
++    export_book_parser.add_argument("--json", action="store_true")
++    export_book_parser.add_argument("--ffmpeg")
++    export_book_parser.add_argument("--ffprobe")
+     inspect = sub.add_parser("inspect", help="Inspect audio and audioexport sidecar")
+     inspect.add_argument("input", type=Path)
+     inspect.add_argument("--json", action="store_true")
+@@ -104,6 +138,25 @@ def _print(payload: Any, *, as_json: bool) -> None:
+         print(json.dumps(payload, indent=2, ensure_ascii=False))
+
+
++
++
++def _print_book_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
++    if as_json:
++        _print(payload, as_json=True)
++        return
++    print(f"workspace: {payload['workspace']}")
++    print(f"variant: {payload['variant']}")
++    print(f"selected chapters: {', '.join(payload['selected_chapters'])}")
++    print(f"input compose report: {payload['input_compose_report']}")
++    print(f"output: {payload['output']}")
++    print(f"export identity: {payload['export_identity']}")
++    print(f"duration: {payload['duration_seconds']:.3f} s")
++    print(
++        "codec/sample-rate/channels: "
++        f"{payload['codec']}/{payload['sample_rate']} Hz/{payload['channels']}"
++    )
++    print(f"reused: {'yes' if payload['reused'] else 'no'}")
++
+ def main(argv: Sequence[str] | None = None) -> int:
+     parser = _parser()
+     args = parser.parse_args(argv)
+@@ -162,6 +215,82 @@ def main(argv: Sequence[str] | None = None) -> int:
+             )
+             _print([item.to_dict() for item in results], as_json=args.json)
+             return 0
++        if args.command == "export-book":
++            book_metadata_values: dict[str, str] = {}
++            for item in args.metadata:
++                if "=" not in item:
++                    raise AudioExportError(
++                        "--metadata requires KEY=VALUE",
++                        code="audioexport.audiobook_metadata_invalid",
++                    )
++                key, value = item.split("=", 1)
++                book_metadata_values[key] = value
++            for field in (
++                "title",
++                "author",
++                "album",
++                "album_artist",
++                "writer",
++                "genre",
++                "description",
++                "long_description",
++                "comment",
++                "copyright",
++                "encoded_by",
++                "language",
++                "publisher",
++                "grouping",
++            ):
++                value = getattr(args, field)
++                if value is not None:
++                    book_metadata_values[field] = value
++
++            book_result = export_book(
++                args.book,
++                variant=args.variant,
++                chapters=args.chapters,
++                output=args.output,
++                profile=args.profile,
++                metadata=book_metadata_values,
++                cover=args.cover,
++                bitrate=args.bitrate,
++                sample_rate=args.sample_rate,
++                channels=args.channels,
++                force=args.force,
++                ffmpeg=args.ffmpeg,
++                ffprobe=args.ffprobe,
++            )
++            try:
++                sidecar_payload = json.loads(book_result.sidecar.read_text(encoding="utf-8"))
++            except (OSError, ValueError) as exc:
++                raise AudioExportError(
++                    f"could not read audiobook verification sidecar: {exc}",
++                    code="audioexport.audiobook_manifest_invalid",
++                ) from exc
++            verified = sidecar_payload.get("verified", {}) if isinstance(sidecar_payload, Mapping) else {}
++            if not isinstance(verified, Mapping):
++                verified = {}
++            duration_ms = book_result.audiobook.duration_ms
++            payload = {
++                "workspace": str(book_result.workspace),
++                "variant": book_result.variant,
++                "selected_chapters": list(book_result.selected_chapter_ids),
++                "selected_chapter_ids": list(book_result.selected_chapter_ids),
++                "input_compose_report": str(
++                    book_result.workspace / "audiocompose" / book_result.variant / "compose-report.toml"
++                ),
++                "output": str(book_result.output),
++                "sidecar": str(book_result.sidecar),
++                "export_identity": book_result.audiobook.export_id,
++                "duration_ms": duration_ms,
++                "duration_seconds": duration_ms / 1000,
++                "codec": book_result.audiobook.codec,
++                "sample_rate": verified.get("sample_rate"),
++                "channels": verified.get("channels"),
++                "reused": book_result.audiobook.reused,
++            }
++            _print_book_export(payload, as_json=args.json)
++            return 0
+         if args.command == "audiobook":
+             metadata_values: dict[str, str] = {}
+             for item in args.metadata:
+diff --git a/tests/test_book.py b/tests/test_book.py
+new file mode 100644
+index 0000000..63d7eab
+--- /dev/null
++++ b/tests/test_book.py
+@@ -0,0 +1,388 @@
++from __future__ import annotations
++
++import hashlib
++import json
++import wave
++from pathlib import Path
++from typing import Any
++
++import pytest
++
++from audioexport.book import resolve_book_export
++from audioexport.errors import InvalidExportError, VerificationError
++
++VARIANT = "narration2--3b5f647f8f57"
++
++
++def _write_wav(path: Path, *, sample_rate: int = 8000, channels: int = 1, frames: int = 800) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with wave.open(str(path), "wb") as target:
++        target.setnchannels(channels)
++        target.setsampwidth(2)
++        target.setframerate(sample_rate)
++        target.writeframes(b"\0\0" * frames * channels)
++
++
++def _report_text(
++    items: list[dict[str, Any]],
++    *,
++    format_name: str = "audiocompose-book-report",
++    version: int = 1,
++    variant: str = VARIANT,
++) -> str:
++    lines = [f'format = {json.dumps(format_name)}', f"version = {version}", f"variant = {json.dumps(variant)}", ""]
++    for item in items:
++        lines.append("[[items]]")
++        for key, value in item.items():
++            lines.append(f"{key} = {json.dumps(value)}")
++        lines.append("")
++    return "\n".join(lines)
++
++
++def _workspace(tmp_path: Path) -> tuple[Path, list[dict[str, Any]]]:
++    workspace = tmp_path / "Platform Decay - Martha Wells.ssmdbook"
++    (workspace / "chapters").mkdir(parents=True)
++    variant_dir = workspace / "audiocompose" / VARIANT
++    variant_dir.mkdir(parents=True)
++    manifest_chapters = [
++        {"id": "chapter-five", "source_number": 5, "title": "Five"},
++        {"id": "chapter-two", "source_number": 2, "title": "Two"},
++        {"id": "chapter-seven", "source_number": 7, "title": "Seven"},
++    ]
++    (workspace / "manifest.json").write_text(
++        json.dumps(
++            {
++                "metadata": {
++                    "title": "Platform Decay",
++                    "authors": ["Martha Wells"],
++                    "publisher": "Example Press",
++                    "language": "en",
++                },
++                "chapters": manifest_chapters,
++            }
++        ),
++        encoding="utf-8",
++    )
++    # Deliberately create files/report items in an order different from the manifest.
++    items: list[dict[str, Any]] = []
++    for chapter in (manifest_chapters[1], manifest_chapters[2], manifest_chapters[0]):
++        filename = f"chapter-{chapter['source_number']:04}.wav"
++        path = variant_dir / filename
++        _write_wav(path)
++        items.append(
++            {
++                "status": "written",
++                "id": chapter["id"],
++                "source_number": chapter["source_number"],
++                "render_plan_id": f"plan-{chapter['source_number']}",
++                "manifest_id": "book-manifest-1",
++                "output": filename,
++                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
++                "sample_rate": 8000,
++                "channels": 1,
++                "frames": 800,
++                "duration_seconds": 0.1,
++                "output_policy_id": "wav-policy-1",
++            }
++        )
++    (variant_dir / "compose-report.toml").write_text(_report_text(items), encoding="utf-8")
++    return workspace, items
++
++
++def _write_report(workspace: Path, items: list[dict[str, Any]], **kwargs: Any) -> None:
++    (workspace / "audiocompose" / VARIANT / "compose-report.toml").write_text(
++        _report_text(items, **kwargs), encoding="utf-8"
++    )
++
++
++def test_resolves_workspace_and_preserves_manifest_order(tmp_path: Path) -> None:
++    workspace, _ = _workspace(tmp_path)
++
++    result = resolve_book_export(workspace / "chapters", variant=VARIANT)
++
++    assert result.workspace == workspace
++    assert [chapter.id for chapter in result.chapters] == [
++        "chapter-five",
++        "chapter-two",
++        "chapter-seven",
++    ]
++    assert [chapter.title for chapter in result.chapters] == ["Five", "Two", "Seven"]
++    assert result.default_output == (
++        workspace / "audioexport" / VARIANT / "Platform Decay - Martha Wells.m4b"
++    )
++    assert all(chapter.path.parent.name == VARIANT for chapter in result.chapters)
++    assert result.chapters[0].duration_seconds == pytest.approx(0.1)
++
++
++@pytest.mark.parametrize(
++    ("selector", "expected"),
++    [
++        ("all", [5, 2, 7]),
++        ("5", [5]),
++        ("2-7", [5, 2, 7]),
++        ("5,7,2-2", [5, 2, 7]),
++    ],
++)
++def test_source_number_selection_returns_manifest_order(
++    tmp_path: Path, selector: str, expected: list[int]
++) -> None:
++    workspace, _ = _workspace(tmp_path)
++
++    result = resolve_book_export(workspace, variant=VARIANT, chapters=selector)
++
++    assert [chapter.source_number for chapter in result.chapters] == expected
++
++
++def test_unknown_source_number_is_rejected(tmp_path: Path) -> None:
++    workspace, _ = _workspace(tmp_path)
++    with pytest.raises(InvalidExportError, match="does not match a source number"):
++        resolve_book_export(workspace, variant=VARIANT, chapters="99")
++
++
++@pytest.mark.parametrize("variant", ["../other", "/tmp/variant", "foo/bar", r"foo\\bar", "C:variant"])
++def test_rejects_unsafe_variants(tmp_path: Path, variant: str) -> None:
++    workspace, _ = _workspace(tmp_path)
++    with pytest.raises(InvalidExportError, match="safe single directory component"):
++        resolve_book_export(workspace, variant=variant)
++
++
++def test_unknown_variant_and_missing_compose_report_are_rejected(tmp_path: Path) -> None:
++    workspace, _ = _workspace(tmp_path)
++    with pytest.raises(InvalidExportError, match="unknown AudioCompose variant"):
++        resolve_book_export(workspace, variant="unknown")
++    (workspace / "audiocompose" / VARIANT / "compose-report.toml").unlink()
++    with pytest.raises(InvalidExportError, match="regular non-symlink file"):
++        resolve_book_export(workspace, variant=VARIANT)
++
++
++@pytest.mark.parametrize(
++    ("format_name", "version", "reported_variant"),
++    [("other", 1, VARIANT), ("audiocompose-book-report", 2, VARIANT), ("audiocompose-book-report", 1, "other")],
++)
++def test_rejects_report_format_version_and_variant_mismatch(
++    tmp_path: Path, format_name: str, version: int, reported_variant: str
++) -> None:
++    workspace, items = _workspace(tmp_path)
++    _write_report(workspace, items, format_name=format_name, version=version, variant=reported_variant)
++
++    with pytest.raises(InvalidExportError, match="format, version, or variant"):
++        resolve_book_export(workspace, variant=VARIANT)
++
++
++def test_rejects_duplicate_compose_item_ids_and_source_numbers(tmp_path: Path) -> None:
++    workspace, items = _workspace(tmp_path)
++    duplicated_id = [*items, {**items[0], "source_number": 99}]
++    _write_report(workspace, duplicated_id)
++    with pytest.raises(InvalidExportError, match="duplicate compose report item id"):
++        resolve_book_export(workspace, variant=VARIANT)
++
++    duplicated_number = [*items, {**items[0], "id": "another-id"}]
++    _write_report(workspace, duplicated_number)
++    with pytest.raises(InvalidExportError, match="duplicate compose report source number"):
++        resolve_book_export(workspace, variant=VARIANT)
++
++
++def test_rejects_missing_selected_compose_item(tmp_path: Path) -> None:
++    workspace, items = _workspace(tmp_path)
++    _write_report(workspace, [item for item in items if item["id"] != "chapter-five"])
++
++    with pytest.raises(InvalidExportError, match="missing selected chapter id chapter-five"):
++        resolve_book_export(workspace, variant=VARIANT, chapters="5")
++
++
++def test_rejects_failed_and_skipped_selected_items(tmp_path: Path) -> None:
++    workspace, items = _workspace(tmp_path)
++    failed = [{**item, "status": "failed"} if item["source_number"] == 5 else item for item in items]
++    _write_report(workspace, failed)
++    with pytest.raises(InvalidExportError, match="unusable compose status 'failed'"):
++        resolve_book_export(workspace, variant=VARIANT, chapters="5")
++
++    skipped = [{**item, "status": "skipped"} if item["source_number"] == 5 else item for item in items]
++    _write_report(workspace, skipped)
++    with pytest.raises(InvalidExportError, match="unusable compose status 'skipped'"):
++        resolve_book_export(workspace, variant=VARIANT, chapters="5")
++
++
++def test_rejects_traversal_and_symlink_report_outputs(tmp_path: Path) -> None:
++    workspace, items = _workspace(tmp_path)
++    traversal = [{**item, "output": "../chapter.wav"} if item["source_number"] == 5 else item for item in items]
++    _write_report(workspace, traversal)
++    with pytest.raises(VerificationError, match="traversal components"):
++        resolve_book_export(workspace, variant=VARIANT, chapters="5")
++
++    variant_dir = workspace / "audiocompose" / VARIANT
++    outside = tmp_path / "outside.wav"
++    _write_wav(outside)
++    link = variant_dir / "linked.wav"
++    link.symlink_to(outside)
++    symlinked = [{**item, "output": "linked.wav"} if item["source_number"] == 5 else item for item in items]
++    _write_report(workspace, symlinked)
++    with pytest.raises(VerificationError, match="symlinks"):
++        resolve_book_export(workspace, variant=VARIANT, chapters="5")
++
++
++def test_rejects_hash_and_wav_geometry_mismatches(tmp_path: Path) -> None:
++    workspace, items = _workspace(tmp_path)
++    bad_hash = [{**item, "sha256": "0" * 64} if item["source_number"] == 5 else item for item in items]
++    _write_report(workspace, bad_hash)
++    with pytest.raises(VerificationError, match="checksum"):
++        resolve_book_export(workspace, variant=VARIANT, chapters="5")
++
++    wrong_geometry = [
++        {**item, "sample_rate": 16000} if item["source_number"] == 5 else item for item in items
++    ]
++    _write_report(workspace, wrong_geometry)
++    with pytest.raises(VerificationError, match="geometry"):
++        resolve_book_export(workspace, variant=VARIANT, chapters="5")
++
++
++def test_rejects_duplicate_manifest_ids(tmp_path: Path) -> None:
++    workspace, _ = _workspace(tmp_path)
++    manifest_path = workspace / "manifest.json"
++    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
++    manifest["chapters"][1]["id"] = manifest["chapters"][0]["id"]
++    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
++    with pytest.raises(InvalidExportError, match="duplicate manifest chapter id"):
++        resolve_book_export(workspace, variant=VARIANT)
++
++
++def test_rejects_non_wav_composed_artifact(tmp_path: Path) -> None:
++    workspace, items = _workspace(tmp_path)
++    artifact = workspace / "audiocompose" / VARIANT / "chapter-0005.wav"
++    artifact.write_bytes(b"not a WAV")
++    updated = [
++        {**item, "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest()}
++        if item["source_number"] == 5
++        else item
++        for item in items
++    ]
++    _write_report(workspace, updated)
++
++    with pytest.raises(VerificationError, match="not a readable WAV"):
++        resolve_book_export(workspace, variant=VARIANT, chapters="5")
++
++
++
++def test_public_export_book_applies_profile_and_explicit_precedence(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    import audioexport.book as book_module
++    from audioexport import AudiobookMetadata, BookExportResult, export_book
++    from audioexport.audiobook import AudiobookResult
++
++    workspace, _ = _workspace(tmp_path)
++    profile_root = tmp_path / "profile"
++    profile_root.mkdir()
++    (profile_root / "input.wav").touch()
++    profile_path = profile_root / "audiobook.toml"
++    profile_path.write_text(
++        'schema = "audioexport.audiobook.v1"\n'
++        'output = "profile-output.m4b"\n'
++        'inputs = ["input.wav"]\n'
++        '[audio]\nbitrate = "96k"\nsample_rate = 44100\nchannels = 2\n'
++        '[metadata]\ntitle = "Profile title"\nauthor = "Profile author"\n',
++        encoding="utf-8",
++    )
++    explicit_cover = tmp_path / "explicit.jpg"
++    explicit_cover.write_bytes(b"cover")
++    captured: dict[str, Any] = {}
++
++    def fake_build(inputs: Any, output: Any, **kwargs: Any) -> AudiobookResult:
++        captured["inputs"] = tuple(inputs)
++        captured["output"] = Path(output)
++        captured["kwargs"] = kwargs
++        destination = Path(output).absolute()
++        return AudiobookResult(
++            destination,
++            "identity",
++            "a" * 64,
++            destination.with_name(destination.name + ".audioexport.json"),
++            False,
++            len(captured["inputs"]),
++            len(captured["inputs"]),
++            300,
++            "aac",
++        )
++
++    monkeypatch.setattr(book_module, "build_audiobook", fake_build)
++    explicit_output = tmp_path / "explicit.m4b"
++    result = export_book(
++        workspace,
++        variant=VARIANT,
++        profile=profile_path,
++        output=explicit_output,
++        metadata={"title": "CLI title", "writer": "CLI writer"},
++        cover=explicit_cover,
++        bitrate="128k",
++        sample_rate=48000,
++        channels=1,
++    )
++
++    assert isinstance(result, BookExportResult)
++    assert result.output == explicit_output
++    assert result.sidecar == explicit_output.with_name("explicit.m4b.audioexport.json")
++    assert result.selected_chapter_ids == ("chapter-five", "chapter-two", "chapter-seven")
++    assert [track.title for track in captured["inputs"]] == ["Five", "Two", "Seven"]
++    assert captured["output"] == explicit_output
++    passed = captured["kwargs"]
++    assert passed["metadata"] == AudiobookMetadata(
++        title="CLI title",
++        author="Profile author",
++        writer="CLI writer",
++        publisher="Example Press",
++        language="en",
++    )
++    assert passed["cover"] == explicit_cover
++    assert (passed["bitrate"], passed["sample_rate"], passed["channels"]) == ("128k", 48000, 1)
++
++    profile_result = export_book(workspace, variant=VARIANT, profile=profile_path, force=True)
++    assert profile_result.output == profile_root / "profile-output.m4b"
++    profile_kwargs = captured["kwargs"]
++    assert profile_kwargs["metadata"] == AudiobookMetadata(
++        title="Profile title",
++        author="Profile author",
++        publisher="Example Press",
++        language="en",
++    )
++    assert (profile_kwargs["bitrate"], profile_kwargs["sample_rate"], profile_kwargs["channels"]) == (
++        "96k",
++        44100,
++        2,
++    )
++    assert profile_kwargs["force"] is True
++
++
++def test_export_book_uses_manifest_defaults_and_deterministic_output(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    import audioexport.book as book_module
++    from audioexport import AudiobookMetadata, export_book
++    from audioexport.audiobook import AudiobookResult
++
++    workspace, _ = _workspace(tmp_path)
++    captured: dict[str, Any] = {}
++
++    def fake_build(inputs: Any, output: Any, **kwargs: Any) -> AudiobookResult:
++        captured["output"] = Path(output)
++        captured["kwargs"] = kwargs
++        destination = Path(output).absolute()
++        return AudiobookResult(
++            destination,
++            "identity",
++            "b" * 64,
++            destination.with_name(destination.name + ".audioexport.json"),
++            True,
++            len(tuple(inputs)),
++            len(tuple(inputs)),
++            300,
++            "aac",
++        )
++
++    monkeypatch.setattr(book_module, "build_audiobook", fake_build)
++    result = export_book(workspace, variant=VARIANT)
++
++    assert captured["output"] == workspace / "audioexport" / VARIANT / "Platform Decay - Martha Wells.m4b"
++    assert captured["kwargs"]["metadata"] == AudiobookMetadata(
++        title="Platform Decay", author="Martha Wells", publisher="Example Press", language="en"
++    )
++    assert result.audiobook.reused is True
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 91fa246..db44d0e 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+
++import hashlib
+ import json
+ import os
+ import shutil
+@@ -173,3 +174,129 @@ def test_cli_audiobook_profile_overrides_metadata_and_output(
+     tags = {key.lower(): value for key, value in info["format"].get("tags", {}).items()}
+     assert tags["title"] == "Profile title"
+     assert tags["artist"] == "CLI author"
++
++
++def _book_fixture(tmp_path: Path, wav: Path) -> tuple[Path, str]:
++    variant = "narration2--3b5f647f8f57"
++    workspace = tmp_path / "Platform Decay.ssmdbook"
++    chapters_dir = workspace / "chapters"
++    chapters_dir.mkdir(parents=True)
++    variant_dir = workspace / "audiocompose" / variant
++    variant_dir.mkdir(parents=True)
++    chapters = [
++        {"id": "chapter-five", "source_number": 5, "title": "Chapter Five"},
++        {"id": "chapter-two", "source_number": 2, "title": "Chapter Two"},
++    ]
++    (workspace / "manifest.json").write_text(
++        json.dumps(
++            {
++                "metadata": {"title": "Platform Decay", "authors": ["Martha Wells"]},
++                "chapters": chapters,
++            }
++        ),
++        encoding="utf-8",
++    )
++    items = []
++    for chapter in reversed(chapters):
++        filename = f"chapter-{chapter['source_number']:04}.wav"
++        artifact = variant_dir / filename
++        shutil.copy2(wav, artifact)
++        items.append(
++            {
++                "status": "written",
++                "id": chapter["id"],
++                "source_number": chapter["source_number"],
++                "render_plan_id": f"plan-{chapter['source_number']}",
++                "manifest_id": "fixture-manifest",
++                "output": filename,
++                "sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
++                "sample_rate": 24000,
++                "channels": 1,
++                "frames": 48000,
++                "duration_seconds": 2.0,
++                "output_policy_id": "wav-policy",
++            }
++        )
++    report = [
++        'format = "audiocompose-book-report"',
++        "version = 1",
++        f"variant = {json.dumps(variant)}",
++        "",
++    ]
++    for item in items:
++        report.append("[[items]]")
++        report.extend(f"{key} = {json.dumps(value)}" for key, value in item.items())
++        report.append("")
++    (variant_dir / "compose-report.toml").write_text("\n".join(report), encoding="utf-8")
++    return workspace, variant
++
++
++def test_cli_export_book_end_to_end_json_human_reuse_and_force(
++    wav: Path, tmp_path: Path, have_tools: None
++) -> None:
++    workspace, variant = _book_fixture(tmp_path, wav)
++    arguments = (
++        "export-book",
++        str(workspace),
++        "--variant",
++        variant,
++        "--title",
++        "CLI title",
++        "--author",
++        "CLI author",
++        "--bitrate",
++        "96k",
++        "--sample-rate",
++        "24000",
++        "--channels",
++        "1",
++    )
++    first = _run(*arguments, "--json")
++    assert first.returncode == 0, first.stderr
++    result = json.loads(first.stdout)
++    output = workspace / "audioexport" / variant / "Platform Decay.m4b"
++    assert result["workspace"] == str(workspace)
++    assert result["variant"] == variant
++    assert result["selected_chapters"] == ["chapter-five", "chapter-two"]
++    assert result["input_compose_report"] == str(
++        workspace / "audiocompose" / variant / "compose-report.toml"
++    )
++    assert result["output"] == str(output)
++    assert result["export_identity"]
++    assert result["duration_ms"] > 0
++    assert result["codec"] == "aac"
++    assert result["sample_rate"] == 24000
++    assert result["channels"] == 1
++    assert result["reused"] is False
++    assert Path(result["sidecar"]).is_file()
++
++    inspected = json.loads(_run("inspect", str(output), "--json").stdout)
++    assert inspected["chapters"][0]["tags"]["title"] == "Chapter Five"
++    assert inspected["chapters"][1]["tags"]["title"] == "Chapter Two"
++    audio = next(stream for stream in inspected["streams"] if stream["codec_type"] == "audio")
++    assert audio["codec_name"] == "aac"
++    tags = {key.lower(): value for key, value in inspected["format"].get("tags", {}).items()}
++    assert tags["title"] == "CLI title"
++    assert tags["artist"] == "CLI author"
++
++    repeated = _run(*arguments, "--json")
++    assert repeated.returncode == 0, repeated.stderr
++    assert json.loads(repeated.stdout)["reused"] is True
++
++    human = _run(*arguments)
++    assert human.returncode == 0, human.stderr
++    for expected in (
++        "workspace:",
++        "variant:",
++        "selected chapters:",
++        "input compose report:",
++        "export identity:",
++        "duration:",
++        "codec/sample-rate/channels:",
++        "reused: yes",
++    ):
++        assert expected in human.stdout
++
++    forced = _run(*arguments, "--force", "--json")
++    assert forced.returncode == 0, forced.stderr
++    assert json.loads(forced.stdout)["reused"] is False

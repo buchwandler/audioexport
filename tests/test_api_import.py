@@ -4,39 +4,44 @@ import audioexport
 from audioexport import (
     AudiobookMetadata,
     AudiobookTrack,
-    ResolvedOutput,
+    BookExportContext,
+    BookExportResult,
+    ComposedChapter,
+    api,
     build_audiobook,
     encode,
+    export_book,
     preflight_profile,
+    resolve_book_export,
     resolve_output,
-)
-from audioexport.api import (
-    ResolvedOutput as ApiResolvedOutput,
-)
-from audioexport.api import (
-    build_audiobook as api_build_audiobook,
-)
-from audioexport.api import (
-    encode as api_encode,
-)
-from audioexport.api import (
-    preflight_profile as api_preflight_profile,
-)
-from audioexport.api import (
-    resolve_output as api_resolve_output,
 )
 
 
 def test_flat_public_api() -> None:
-    assert encode is api_encode
-    assert build_audiobook is api_build_audiobook
+    public_pairs = (
+        (encode, api.encode),
+        (build_audiobook, api.build_audiobook),
+        (resolve_output, api.resolve_output),
+        (preflight_profile, api.preflight_profile),
+        (BookExportContext, api.BookExportContext),
+        (BookExportResult, api.BookExportResult),
+        (ComposedChapter, api.ComposedChapter),
+        (export_book, api.export_book),
+        (resolve_book_export, api.resolve_book_export),
+    )
+    assert all(root_symbol is api_symbol for root_symbol, api_symbol in public_pairs)
     assert AudiobookTrack.__name__ == "AudiobookTrack"
     assert AudiobookMetadata.__name__ == "AudiobookMetadata"
-    assert ResolvedOutput is ApiResolvedOutput
-    assert resolve_output is api_resolve_output
-    assert preflight_profile is api_preflight_profile
-    public_symbols = {"ResolvedOutput", "resolve_output", "preflight_profile"}
-    assert public_symbols.issubset(audioexport.__all__)
-    from audioexport import api
 
+    public_symbols = {
+        "ResolvedOutput",
+        "resolve_output",
+        "preflight_profile",
+        "BookExportContext",
+        "BookExportResult",
+        "ComposedChapter",
+        "export_book",
+        "resolve_book_export",
+    }
+    assert public_symbols.issubset(audioexport.__all__)
     assert public_symbols.issubset(api.__all__)

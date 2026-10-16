@@ -1,0 +1,38 @@
+rows:
+  - sha: af103c6af649d127a42100a6374c3d0cf7680543
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/book.py
+      - audioexport/cli.py
+      - tests/test_book.py
+      - tests/test_cli.py
+    observed_behavior: "Added `export_book`/`resolve_book_export` and `audioexport export-book` for manifest-ordered chapter selection from a composed-book variant; validates report entries, safe paths, SHA-256, and WAV geometry before verified M4B assembly, with API/CLI regression coverage."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 869686a601deacb7aa6d7d5a98fc328accebe9b6
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audioexport/audiobook.py
+      - audioexport/book.py
+      - audioexport/cli.py
+      - audioexport/metadata.py
+      - audioexport/pipeline.py
+      - pyproject.toml
+      - tests/test_audiobook_metadata.py
+      - tests/test_audiobook_real.py
+      - tests/test_book.py
+      - tests/test_core.py
+    observed_behavior: "Normalized BCP 47/ISO language tags to ISO 639-2/T for M4A/M4B metadata and verification; added `langcodes>=3.3` and accepts singular `[[item]]` plus legacy `[[items]]` reports and prefixed SHA-256 digests, with FFmpeg and regression tests."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

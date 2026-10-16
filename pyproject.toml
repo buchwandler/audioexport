@@ -26,6 +26,10 @@ classifiers = [
 ]
 
 dependencies = ["tomli>=2; python_version < '3.11'", "langcodes>=3.3"]
+[project.urls]
+Homepage = "https://github.com/buchwandler/audioexport"
+Repository = "https://github.com/buchwandler/audioexport"
+
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6", "build>=1", "mypy>=1.10", "twine>=5"]
@@ -42,7 +46,7 @@ exclude = ["tests*"]
 audioexport = ["py.typed"]
 
 [tool.setuptools_scm]
-fallback_version = "0.1.0.dev0"
+fallback_version = "0.1.2.dev0"
 version_file = "audioexport/_version.py"
 
 [tool.pytest.ini_options]

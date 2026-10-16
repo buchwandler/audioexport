@@ -1,0 +1,89 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.1.2
+git_base_ref: v0.1.1
+git_base_sha: 2fd1d27a9a83e99a31adb4892195cd9fc8a3efb2
+git_head_ref: HEAD
+git_head_sha: 869686a601deacb7aa6d7d5a98fc328accebe9b6
+git_range: 2fd1d27a9a83e99a31adb4892195cd9fc8a3efb2..869686a601deacb7aa6d7d5a98fc328accebe9b6
+commit_count: 2
+rows:
+  - sha: af103c6af649d127a42100a6374c3d0cf7680543
+    source_ref: git:af103c6af649d127a42100a6374c3d0cf7680543
+    short_sha: af103c6
+    changed_paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/book.py
+      - audioexport/cli.py
+      - tests/test_book.py
+      - tests/test_cli.py
+    stats:
+      files_changed: 6
+      insertions: 1401
+      deletions: 0
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/book.py
+      - audioexport/cli.py
+      - tests/test_book.py
+      - tests/test_cli.py
+    observed_behavior:
+      Added `export_book`/`resolve_book_export` and `audioexport export-book`
+      for manifest-ordered chapter selection from a composed-book variant; validates
+      report entries, safe paths, SHA-256, and WAV geometry before verified M4B assembly,
+      with API/CLI regression coverage.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: add book support"
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: 869686a601deacb7aa6d7d5a98fc328accebe9b6
+    source_ref: git:869686a601deacb7aa6d7d5a98fc328accebe9b6
+    short_sha: 869686a
+    changed_paths:
+      - README.md
+      - audioexport/audiobook.py
+      - audioexport/book.py
+      - audioexport/cli.py
+      - audioexport/metadata.py
+      - audioexport/pipeline.py
+      - pyproject.toml
+      - tests/test_audiobook_metadata.py
+      - tests/test_audiobook_real.py
+      - tests/test_book.py
+      - tests/test_core.py
+    stats:
+      files_changed: 11
+      insertions: 213
+      deletions: 54
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audioexport/audiobook.py
+      - audioexport/book.py
+      - audioexport/cli.py
+      - audioexport/metadata.py
+      - audioexport/pipeline.py
+      - pyproject.toml
+      - tests/test_audiobook_metadata.py
+      - tests/test_audiobook_real.py
+      - tests/test_book.py
+      - tests/test_core.py
+    observed_behavior:
+      Normalized BCP 47/ISO language tags to ISO 639-2/T for M4A/M4B
+      metadata and verification; added `langcodes>=3.3` and accepts singular `[[item]]`
+      plus legacy `[[items]]` reports and prefixed SHA-256 digests, with FFmpeg and
+      regression tests.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: language support and better export book"
+    target_entry_id: entry-0002
+    notes: ""

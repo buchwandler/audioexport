@@ -1,0 +1,85 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.2
+git_base_ref: 2fd1d27a9a83e99a31adb4892195cd9fc8a3efb2
+git_base_sha: 2fd1d27a9a83e99a31adb4892195cd9fc8a3efb2
+git_head_ref: 869686a601deacb7aa6d7d5a98fc328accebe9b6
+git_head_sha: 869686a601deacb7aa6d7d5a98fc328accebe9b6
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: "Added verified .ssmdbook-to-M4B export with manifest-ordered chapter selection and compose-report validation"
+    status: accepted
+    source_refs:
+      - git:af103c6af649d127a42100a6374c3d0cf7680543
+    paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/book.py
+      - audioexport/cli.py
+      - tests/test_book.py
+      - tests/test_cli.py
+    sources:
+      - git:af103c6af649d127a42100a6374c3d0cf7680543
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: changed
+    summary: "Changed M4A/M4B language handling to langcodes-based ISO 639-2/T and accepted current AudioCompose reports"
+    status: accepted
+    source_refs:
+      - git:869686a601deacb7aa6d7d5a98fc328accebe9b6
+    paths:
+      - README.md
+      - audioexport/audiobook.py
+      - audioexport/book.py
+      - audioexport/cli.py
+      - audioexport/metadata.py
+      - audioexport/pipeline.py
+      - pyproject.toml
+      - tests/test_audiobook_metadata.py
+      - tests/test_audiobook_real.py
+      - tests/test_book.py
+      - tests/test_core.py
+    sources:
+      - git:869686a601deacb7aa6d7d5a98fc328accebe9b6
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: "Added BookExportContext, BookExportResult, ComposedChapter, export_book, resolve_book_export to audioexport.api"
+    status: accepted
+    source_refs:
+      - tl:task-0005
+    paths:
+      - audioexport/api.py
+      - tests/test_api_import.py
+      - scripts/check_package_artifacts.py
+    prs: []
+    issues: []
+  - kind: quality
+    summary: "Improved package artifact checks and release documentation for v0.1.2"
+    status: accepted
+    sources:
+      - tl:task-0005
+    paths:
+      - scripts/check_package_artifacts.py
+      - tests/test_package_artifacts.py
+      - tests/test_examples.py
+      - examples/audiobook.toml
+      - examples/chapters.txt
+      - examples/create_ssmdbook_demo.py
+      - README.md
+      - docs/index.md
+      - docs/conf.py
+      - docs/changelog.md
+      - .github/workflows/tests.yml
+      - .github/workflows/python-release.yml
+      - .github/workflows/pre-commit.yml
+      - pyproject.toml
+    prs: []
+    issues: []

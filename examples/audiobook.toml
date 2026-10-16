@@ -1,0 +1,18 @@
+# Run this example from examples after creating demo.wav there.
+schema = "audioexport.audiobook.v1"
+output = "audioexport-demo.m4b"
+inputs = ["demo.wav"]
+chapters_file = "chapters.txt"
+
+[audio]
+bitrate = "96k"
+
+[metadata]
+title = "AudioExport Demo"
+author = "AudioExport"
+album = "AudioExport Demo"
+genre = "Audiobook"
+language = "eng"
+
+[chapters]
+mode = "explicit"

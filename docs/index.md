@@ -91,6 +91,44 @@ chapter boundaries, or provide an `audioexport.audiobook.v1` profile for a
 repeatable assembly. The audiobook workflow normalizes tracks, concatenates
 them, writes metadata and chapters, and verifies the final artifact.
 
+## Native `.ssmdbook` export
+
+Use `export-book` when a composed-book workspace is ready for final M4B assembly. A standard workspace contains `manifest.json`, a `chapters/` directory, and an AudioCompose report at `audiocompose/<variant>/compose-report.toml`; the report identifies composed WAV outputs and the variant that produced them.
+
+```bash
+audioexport export-book "My Book.ssmdbook" \
+  --variant "$VARIANT" \
+  --chapters 5,7,11-13 \
+  --output exports/book.m4b \
+  --title "My Book" --author "An Author" --language en-US
+```
+
+The chapter selector accepts `all` (the default), a source number, an inclusive range, or comma-separated numbers/ranges. Selection is emitted in manifest chapter order. Before assembly, AudioExport verifies the selected report entries, SHA-256 digest, and WAV sample rate, channel count, frame count, and duration; failed, skipped, or missing entries cannot be exported. The report supports both `[[item]]` and legacy `[[items]]` arrays.
+
+The default output is `audioexport/<variant>/<workspace-name-without-.ssmdbook>.m4b` inside the workspace. `--output` overrides it. Metadata precedence is manifest values, then audiobook-profile values, then explicit CLI/API metadata; audio settings follow defaults, profile settings, then explicit flags. Profile output is used when supplied unless `--output` is explicit. For M4A/M4B, BCP 47 language tags are normalized to ISO 639-2/T track codes (for example, `en-US` to `eng`).
+
+Python callers can resolve and inspect the selected, verified chapters before exporting:
+
+```python
+from pathlib import Path
+from audioexport import export_book, resolve_book_export
+
+workspace = Path("My Book.ssmdbook")
+variant = "my-variant"
+context = resolve_book_export(workspace, variant=variant, chapters="5,7")
+print(context.default_output, [chapter.title for chapter in context.chapters])
+
+result = export_book(
+    workspace,
+    variant=variant,
+    chapters="5,7",
+    output=Path("exports/book.m4b"),
+)
+print(result.output, result.selected_chapter_ids)
+```
+
+`BookExportContext`, `BookExportResult`, and `ComposedChapter` describe resolved inputs and export results. This adapter does not run AudioCompose or modify Readio project state.
+
 ## Python API
 
 The public API is available from both `audioexport` and `audioexport.api`:
@@ -119,6 +157,7 @@ Important public entry points include:
 - `encode()` for one prepared source
 - `run_profile()` for multiple configured outputs
 - `build_audiobook()` for ordered-track assembly
+- `export_book()` and `resolve_book_export()` for verified composed-book export; `BookExportContext`, `BookExportResult`, and `ComposedChapter` describe its public results
 - `preflight_profile()` for read-only profile validation
 - `doctor()` and `probe()` for tool and artifact diagnostics
 - `load_profile()` and `load_audiobook_profile()` for TOML profiles

@@ -1,0 +1,60 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 1
+release_version: v0.1.2
+git_base_ref: v0.1.1
+git_base_sha: 2fd1d27a9a83e99a31adb4892195cd9fc8a3efb2
+git_head_ref: HEAD
+git_head_sha: 869686a601deacb7aa6d7d5a98fc328accebe9b6
+git_range: 2fd1d27a9a83e99a31adb4892195cd9fc8a3efb2..869686a601deacb7aa6d7d5a98fc328accebe9b6
+commit_count: 2
+rows:
+  - sha: af103c6af649d127a42100a6374c3d0cf7680543
+    source_ref: git:af103c6af649d127a42100a6374c3d0cf7680543
+    short_sha: af103c6
+    changed_paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/book.py
+      - audioexport/cli.py
+      - tests/test_book.py
+      - tests/test_cli.py
+    stats:
+      files_changed: 6
+      insertions: 1401
+      deletions: 0
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: add book support"
+  - sha: 869686a601deacb7aa6d7d5a98fc328accebe9b6
+    source_ref: git:869686a601deacb7aa6d7d5a98fc328accebe9b6
+    short_sha: 869686a
+    changed_paths:
+      - README.md
+      - audioexport/audiobook.py
+      - audioexport/book.py
+      - audioexport/cli.py
+      - audioexport/metadata.py
+      - audioexport/pipeline.py
+      - pyproject.toml
+      - tests/test_audiobook_metadata.py
+      - tests/test_audiobook_real.py
+      - tests/test_book.py
+      - tests/test_core.py
+    stats:
+      files_changed: 11
+      insertions: 213
+      deletions: 54
+    inspected: false
+    inspected_paths: []
+    observed_behavior: ""
+    public_impact: unknown
+    decision: needs_review
+    stale: false
+    evidence_subject: "feat: language support and better export book"

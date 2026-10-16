@@ -24,7 +24,7 @@ audioexport doctor --json
 
 `doctor` reports package/tool versions and encoder availability per format. Its existing `ready` key means FFmpeg and FFprobe are present; `all_formats_ready` and each `formats` entry report encoder capability and a reason when unavailable. The additive `features` entries report `m4b_encode`, `m4b_audiobook`, and `m4b_stream_copy` availability; missing optional capabilities do not make `ready` false. `run_profile()` checks the encoders selected by the profile before writing outputs.
 
-The only base Python dependency is `tomli` on Python 3.10. FFmpeg/FFprobe are external executables; AudioExport does not install or import Readio, AudioCompose, UtterPlan, VoiceRender, soundfile, or NumPy.
+Base Python dependencies are `langcodes>=3.3` on all supported versions and `tomli>=2` on Python 3.10. FFmpeg/FFprobe are external executables; AudioExport does not install or import Readio, AudioCompose, UtterPlan, VoiceRender, soundfile, or NumPy.
 
 ## CLI quickstart
 
@@ -170,7 +170,7 @@ print(probe("exported/book.m4b")["chapters"])
 
 You may import the same public functions from `audioexport.api` as well as from `audioexport`.
 
-The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult`; `build_audiobook()` returns an `AudiobookResult` with track/chapter counts and verified duration. Both APIs include identity, path, checksum, and reuse state, and work without a Readio project.
+The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult`; `build_audiobook()` returns an `AudiobookResult`; `export_book()` and `resolve_book_export()` provide verified composed-book export through `BookExportContext`, `BookExportResult`, and `ComposedChapter`. These symbols, like the other public functions, are available from both `audioexport` and `audioexport.api`.
 
 ## Export profile
 
@@ -283,9 +283,9 @@ For an incremental Readio migration, the same `--timeline` API also reads **Read
 
 Encoding uses argument-vector subprocess calls (`shell=False`) and stages both audio and manifest before committing. The output lock serializes same-target writers across processes; a competing call receives a typed busy error. If a sidecar commit fails, the previous output/manifest are restored when possible. A recovery failure retains its backup and refuses to treat a mismatched sidecar as current; inspect the reported recovery path before retrying. FFprobe validation checks the single audio stream, codec, duration, requested tags/chapters, and cover codec/disposition.
 
-Version is dynamic through `setuptools-scm`: `pyproject.toml` has no static `version` field, and Git tags determine wheel/sdist metadata, `audioexport.__version__`, and CLI output. The project supports Python 3.10+ and retains the flat `audioexport/` layout. Unversioned archives use a development fallback; a fallback build must never be treated as final `0.1.0`.
+Version is dynamic through `setuptools-scm`: `pyproject.toml` has no static `version` field, and Git tags determine wheel/sdist metadata, `audioexport.__version__`, and CLI output. The project supports Python 3.10+ and retains the flat `audioexport/` layout. Unversioned archives use a development fallback; a fallback build must never be treated as final `0.1.2`.
 
-For a release, first commit the code and wait for the complete Linux/Windows/macOS, Python 3.10/3.13 CI matrix. Then create and push the intended version tag (for example `v0.1.0`). Manually dispatch `.github/workflows/release.yml` with that existing tag. It reruns the test matrix, checks the tag against wheel/sdist metadata, inspects package contents, installs the wheel outside the checkout, and checks CLI/API version parity. Publishing uses PyPI trusted publishing only after the `pypi` GitHub environment is approved; repository administrators must configure required reviewers for that environment and register the trusted publisher on PyPI. Do not publish from an untagged/fallback build.
+For a release, first commit the code and wait for the complete Linux/Windows/macOS, Python 3.10–3.14 CI matrix, including its Sphinx warning-as-error documentation build. Then create and push the intended version tag (for example `v0.1.2`). Manually dispatch the GitHub Actions workflow named **Release** with that existing tag. It reruns the full supported-Python test matrix, checks the tag against wheel/sdist metadata, inspects package contents, installs the wheel outside the checkout, and checks CLI/API version parity. Publishing uses the configured `PYPI_API_TOKEN` secret after approval in the `pypi` GitHub environment; repository administrators must ensure the token and environment approval rules are configured. Do not publish from an untagged/fallback build.
 
 ## Readio migration
 
@@ -306,7 +306,7 @@ python scripts/check_package_artifacts.py
 audioexport doctor --json
 ```
 
-Tests cover seven real formats in one profile, mixed-format audiobook assembly, 100-track ordering/chapters, audiobook cache invalidation, M4A/M4B chapters and covers, Readio sample timelines, malformed probes, encoder availability, transactional failure recovery, no-clobber behavior, and concurrent writers. CI runs Python 3.10 and 3.13 on Linux, Windows, and macOS, and checks lint, formatting, typing, build metadata, Twine, package contents, and an isolated wheel install outside the checkout. Cross-platform encoder availability still depends on the FFmpeg build installed by the runner.
+Tests cover seven real formats in one profile, mixed-format audiobook assembly, 100-track ordering/chapters, audiobook cache invalidation, M4A/M4B chapters and covers, Readio sample timelines, malformed probes, encoder availability, transactional failure recovery, no-clobber behavior, and concurrent writers. Normal CI runs Python 3.10–3.14 on Linux, Windows, and macOS, and checks tests, lint, formatting, typing, build metadata, Twine, package contents, and isolated wheel installation. CI also builds the Sphinx documentation on Linux/Python 3.13 with warnings treated as errors. The manually dispatched **Release** workflow retests the full supported Python range before packaging and API-token publishing. Cross-platform encoder availability depends on the FFmpeg build installed by each runner.
 
 ## Limitations (MVP)
 

@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any
 
-from langcodes import Language
+from langcodes import Language  # type: ignore[import-not-found]
 
 from .errors import InvalidExportError
 
@@ -37,7 +37,7 @@ def iso639_2_language_code(value: str) -> str:
             code="audioexport.audiobook_metadata_invalid",
         )
     try:
-        return Language.get(value.strip()).to_alpha3()
+        return str(Language.get(value.strip()).to_alpha3())
     except (LookupError, ValueError) as exc:
         raise InvalidExportError(
             "language metadata must be a recognized BCP 47 or ISO 639 tag",

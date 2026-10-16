@@ -9,6 +9,7 @@ import tempfile
 import venv
 import zipfile
 from pathlib import Path
+from typing import NoReturn
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name, parse_sdist_filename, parse_wheel_filename
@@ -18,14 +19,19 @@ REQUIRED_MODULES = {
     "__main__.py",
     "_version.py",
     "api.py",
+    "audiobook.py",
+    "audiobook_profile.py",
+    "book.py",
     "chapters.py",
     "cli.py",
     "errors.py",
     "fftools.py",
     "formats.py",
+    "inputs.py",
+    "metadata.py",
     "pipeline.py",
-    "profile.py",
     "preflight.py",
+    "profile.py",
     "validation.py",
 }
 FORBIDDEN_RUNTIME_DEPENDENCIES = {
@@ -36,9 +42,10 @@ FORBIDDEN_RUNTIME_DEPENDENCIES = {
     "utterplan",
     "voicerender",
 }
+ALLOWED_RUNTIME_DEPENDENCIES = {"tomli", "langcodes"}
 
 
-def _fail(message: str) -> None:
+def _fail(message: str) -> NoReturn:
     raise SystemExit(f"package artifact check failed: {message}")
 
 
@@ -55,6 +62,8 @@ def _check_runtime_metadata(metadata: email.message.Message, expected_version: s
         _fail(f"expected version {expected_version}, found {version}")
     if metadata.get("Requires-Python") != ">=3.10":
         _fail(f"unexpected Requires-Python: {metadata.get('Requires-Python')!r}")
+
+    base_dependencies: set[str] = set()
     for raw_requirement in metadata.get_all("Requires-Dist", []):
         requirement = Requirement(raw_requirement)
         marker = requirement.marker
@@ -63,14 +72,28 @@ def _check_runtime_metadata(metadata: email.message.Message, expected_version: s
         normalized = canonicalize_name(requirement.name)
         if normalized in FORBIDDEN_RUNTIME_DEPENDENCIES:
             _fail(f"forbidden runtime dependency: {raw_requirement}")
-        if normalized != "tomli":
+        if normalized not in ALLOWED_RUNTIME_DEPENDENCIES:
             _fail(f"unexpected runtime dependency: {raw_requirement}")
-        if (
-            marker is None
-            or not marker.evaluate({"python_version": "3.10", "extra": ""})
-            or marker.evaluate({"python_version": "3.11", "extra": ""})
-        ):
-            _fail(f"tomli must be conditional on Python < 3.11: {raw_requirement}")
+        if requirement.extras or requirement.url is not None:
+            _fail(f"unexpected runtime dependency form: {raw_requirement}")
+        if normalized in base_dependencies:
+            _fail(f"duplicate runtime dependency: {raw_requirement}")
+        base_dependencies.add(normalized)
+
+        if normalized == "tomli":
+            if str(requirement.specifier) != ">=2":
+                _fail(f"tomli must require version >=2: {raw_requirement}")
+            if marker is None or str(marker) != 'python_version < "3.11"':
+                _fail(f"tomli must be conditional on Python < 3.11: {raw_requirement}")
+        elif normalized == "langcodes":
+            if str(requirement.specifier) != ">=3.3":
+                _fail(f"langcodes must require version >=3.3: {raw_requirement}")
+            if marker is not None:
+                _fail(f"langcodes must be an unconditional runtime dependency: {raw_requirement}")
+
+    if base_dependencies != ALLOWED_RUNTIME_DEPENDENCIES:
+        missing = sorted(ALLOWED_RUNTIME_DEPENDENCIES - base_dependencies)
+        _fail(f"missing required runtime dependencies: {', '.join(missing)}")
     return version
 
 
@@ -94,7 +117,8 @@ def _check_wheel(path: Path, expected_version: str | None) -> str:
         wheel_version = _check_runtime_metadata(metadata, expected_version)
         if str(parsed_version) != wheel_version:
             _fail("wheel filename and METADATA versions differ")
-        if not metadata.get_payload().strip():
+        description = metadata.get_payload()
+        if not isinstance(description, str) or not description.strip():
             _fail("wheel metadata is missing its README description")
         if not any(item.endswith(("/LICENSE", "/licenses/LICENSE")) for item in files):
             _fail("wheel is missing the license file")
@@ -167,21 +191,25 @@ def _smoke_install(wheel: Path, version: str, source_root: Path) -> None:
         smoke = (
             "import importlib.metadata as metadata; "
             "import importlib.resources as resources; "
-            "from pathlib import Path; import sys; import audioexport; "
-            "from audioexport import ResolvedOutput, resolve_output, preflight_profile, "
-            "encode, run_profile, load_profile, probe, doctor; "
-            "from audioexport.api import ResolvedOutput as ApiResolvedOutput, "
-            "resolve_output as api_resolve_output, "
-            "preflight_profile as api_preflight_profile; "
-            "assert ResolvedOutput is ApiResolvedOutput and "
-            "resolve_output is api_resolve_output and "
-            "preflight_profile is api_preflight_profile; "
+            "from pathlib import Path; import sys; import audioexport; import audioexport.api as api; "
+            "from audioexport import (AudiobookMetadata, AudiobookTrack, BookExportContext, "
+            "BookExportResult, ComposedChapter, ResolvedOutput, build_audiobook, doctor, "
+            "encode, export_book, load_profile, preflight_profile, probe, resolve_book_export, "
+            "resolve_output, run_profile); "
+            "assert all(getattr(audioexport, name) is getattr(api, name) for name in "
+            "('BookExportContext', 'BookExportResult', 'ComposedChapter', 'export_book', "
+            "'resolve_book_export')); "
+            "assert all(name in audioexport.__all__ and name in api.__all__ for name in "
+            "('BookExportContext', 'BookExportResult', 'ComposedChapter', 'export_book', "
+            "'resolve_book_export')); "
             f"assert audioexport.__version__ == metadata.version('audioexport') == {version!r}; "
             "assert resources.files('audioexport').joinpath('py.typed').is_file(); "
             f"assert not Path(audioexport.__file__).resolve().is_relative_to(Path({str(source_root)!r})); "
             "assert not any(name in sys.modules for name in "
             "('readio', 'audiocompose', 'utterplan', 'voicerender', 'soundfile', 'numpy')); "
-            "assert all(callable(item) for item in (ResolvedOutput, resolve_output, "
+            "assert all(callable(item) for item in (AudiobookMetadata, AudiobookTrack, "
+            "BookExportContext, BookExportResult, ComposedChapter, ResolvedOutput, "
+            "build_audiobook, export_book, resolve_book_export, resolve_output, "
             "preflight_profile, encode, run_profile, load_profile, probe, doctor))"
         )
         result = _run([str(python), "-c", smoke], cwd=temp_root)

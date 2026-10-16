@@ -1,0 +1,52 @@
+{
+  "candidate_count": 2,
+  "candidates": [
+    {
+      "additions": 1401,
+      "deletions": 0,
+      "patch_file": "af103c6.patch",
+      "patch_sha256": "94e36f7973f6e4aa4155523010d3ba658e679a3713490e440575d8323210beea",
+      "paths": [
+        "README.md",
+        "audioexport/__init__.py",
+        "audioexport/book.py",
+        "audioexport/cli.py",
+        "tests/test_book.py",
+        "tests/test_cli.py"
+      ],
+      "sha": "af103c6af649d127a42100a6374c3d0cf7680543",
+      "short_sha": "af103c6",
+      "source_ref": "git:af103c6af649d127a42100a6374c3d0cf7680543"
+    },
+    {
+      "additions": 213,
+      "deletions": 54,
+      "patch_file": "869686a.patch",
+      "patch_sha256": "807a454e142fc19b70e2279c91907b0becbf4eb018f8ea1f9d4f6a7cf0a93f9c",
+      "paths": [
+        "README.md",
+        "audioexport/audiobook.py",
+        "audioexport/book.py",
+        "audioexport/cli.py",
+        "audioexport/metadata.py",
+        "audioexport/pipeline.py",
+        "pyproject.toml",
+        "tests/test_audiobook_metadata.py",
+        "tests/test_audiobook_real.py",
+        "tests/test_book.py",
+        "tests/test_core.py"
+      ],
+      "sha": "869686a601deacb7aa6d7d5a98fc328accebe9b6",
+      "short_sha": "869686a",
+      "source_ref": "git:869686a601deacb7aa6d7d5a98fc328accebe9b6"
+    }
+  ],
+  "git_base_ref": "2fd1d27a9a83e99a31adb4892195cd9fc8a3efb2",
+  "git_base_sha": "2fd1d27a9a83e99a31adb4892195cd9fc8a3efb2",
+  "git_head_ref": "869686a601deacb7aa6d7d5a98fc328accebe9b6",
+  "git_head_sha": "869686a601deacb7aa6d7d5a98fc328accebe9b6",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.1.2",
+  "schema_version": 1
+}
