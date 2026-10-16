@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from audioexport.errors import InvalidExportError
-from audioexport.metadata import AudiobookMetadata, audiobook_tags
+from audioexport.metadata import AudiobookMetadata, audiobook_tags, iso639_2_language_code
 
 
 def test_canonical_audiobook_fields_map_to_ffmpeg_tags() -> None:
@@ -62,3 +62,17 @@ def test_invalid_metadata_is_rejected(metadata: object) -> None:
 def test_typed_model_rejects_non_string_values() -> None:
     with pytest.raises(InvalidExportError):
         AudiobookMetadata(author=12)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [("en-US", "eng"), ("fr-CA", "fra"), ("eng", "eng")],
+)
+def test_iso639_2_language_code_converts_bcp47_and_iso_tags(tag: str, expected: str) -> None:
+    assert iso639_2_language_code(tag) == expected
+
+
+@pytest.mark.parametrize("tag", ["", "xx-ZZ"])
+def test_iso639_2_language_code_rejects_unmapped_tags(tag: str) -> None:
+    with pytest.raises(InvalidExportError, match="recognized BCP 47"):
+        iso639_2_language_code(tag)

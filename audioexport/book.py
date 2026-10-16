@@ -95,7 +95,9 @@ def _read_manifest(path: Path) -> Mapping[str, Any]:
             path.read_text(encoding="utf-8"), object_pairs_hook=_duplicate_checked_object
         )
     except (OSError, UnicodeDecodeError, ValueError) as exc:
-        raise _fail(f"cannot read book manifest: {exc}", code="audioexport.book_manifest_invalid") from exc
+        raise _fail(
+            f"cannot read book manifest: {exc}", code="audioexport.book_manifest_invalid"
+        ) from exc
     if not isinstance(payload, Mapping):
         raise _fail("book manifest must be a JSON object", code="audioexport.book_manifest_invalid")
     return payload
@@ -163,14 +165,20 @@ def _validate_metadata(payload: Mapping[str, Any]) -> None:
     if not isinstance(metadata, Mapping):
         raise _fail("manifest metadata must be an object", code="audioexport.book_manifest_invalid")
     if "title" in metadata and metadata["title"] is not None:
-        _nonempty_string(metadata["title"], "manifest metadata.title", code="audioexport.book_manifest_invalid")
+        _nonempty_string(
+            metadata["title"], "manifest metadata.title", code="audioexport.book_manifest_invalid"
+        )
     if "publisher" in metadata and metadata["publisher"] is not None:
         _nonempty_string(
-            metadata["publisher"], "manifest metadata.publisher", code="audioexport.book_manifest_invalid"
+            metadata["publisher"],
+            "manifest metadata.publisher",
+            code="audioexport.book_manifest_invalid",
         )
     if "language" in metadata and metadata["language"] is not None:
         _nonempty_string(
-            metadata["language"], "manifest metadata.language", code="audioexport.book_manifest_invalid"
+            metadata["language"],
+            "manifest metadata.language",
+            code="audioexport.book_manifest_invalid",
         )
     if "authors" in metadata and metadata["authors"] is not None:
         authors = metadata["authors"]
@@ -185,7 +193,10 @@ def _validate_metadata(payload: Mapping[str, Any]) -> None:
 
 def _safe_variant(variant: str) -> str:
     if not isinstance(variant, str) or not variant or variant in {".", ".."}:
-        raise _fail("variant must be a safe single directory component", code="audioexport.book_variant_invalid")
+        raise _fail(
+            "variant must be a safe single directory component",
+            code="audioexport.book_variant_invalid",
+        )
     if (
         "/" in variant
         or "\\" in variant
@@ -194,7 +205,10 @@ def _safe_variant(variant: str) -> str:
         or PureWindowsPath(variant).is_absolute()
         or any(ord(character) < 32 for character in variant)
     ):
-        raise _fail("variant must be a safe single directory component", code="audioexport.book_variant_invalid")
+        raise _fail(
+            "variant must be a safe single directory component",
+            code="audioexport.book_variant_invalid",
+        )
     return variant
 
 
@@ -233,7 +247,11 @@ def _workspace_for(book: str | Path) -> Path:
 
 
 def _report_root(workspace: Path, audiocompose_root: str | Path | None) -> Path:
-    root = Path(audiocompose_root).expanduser() if audiocompose_root is not None else workspace / "audiocompose"
+    root = (
+        Path(audiocompose_root).expanduser()
+        if audiocompose_root is not None
+        else workspace / "audiocompose"
+    )
     if not root.is_absolute():
         root = workspace / root
     try:
@@ -328,10 +346,14 @@ def _sha256(path: Path) -> str:
 
 def _verify_wav(path: Path, item: Mapping[str, Any]) -> tuple[int, int, int, float]:
     expected_rate = _positive_int(
-        item.get("sample_rate"), "compose item sample_rate", code="audioexport.book_compose_report_invalid"
+        item.get("sample_rate"),
+        "compose item sample_rate",
+        code="audioexport.book_compose_report_invalid",
     )
     expected_channels = _positive_int(
-        item.get("channels"), "compose item channels", code="audioexport.book_compose_report_invalid"
+        item.get("channels"),
+        "compose item channels",
+        code="audioexport.book_compose_report_invalid",
     )
     expected_frames = _positive_int(
         item.get("frames"), "compose item frames", code="audioexport.book_compose_report_invalid"
@@ -395,10 +417,18 @@ def _read_compose_report(path: Path, requested_variant: str) -> tuple[Mapping[st
             "compose report format, version, or variant does not match the requested export",
             code="audioexport.book_compose_report_invalid",
         )
-    items = payload.get("items")
+    has_singular_items = "item" in payload
+    has_plural_items = "items" in payload
+    if has_singular_items == has_plural_items:
+        raise _fail(
+            "compose report must contain exactly one item or items array",
+            code="audioexport.book_compose_report_invalid",
+        )
+    items_key = "item" if has_singular_items else "items"
+    items = payload[items_key]
     if not isinstance(items, list):
         raise _fail(
-            "compose report must contain an items array",
+            f"compose report {items_key} must be an array",
             code="audioexport.book_compose_report_invalid",
         )
     seen_ids: set[str] = set()
@@ -411,7 +441,9 @@ def _read_compose_report(path: Path, requested_variant: str) -> tuple[Mapping[st
                 code="audioexport.book_compose_report_invalid",
             )
         item_id = _nonempty_string(
-            raw.get("id"), f"compose report item {index} id", code="audioexport.book_compose_report_invalid"
+            raw.get("id"),
+            f"compose report item {index} id",
+            code="audioexport.book_compose_report_invalid",
         )
         source_number = _positive_int(
             raw.get("source_number"),
@@ -444,9 +476,13 @@ def _read_compose_report(path: Path, requested_variant: str) -> tuple[Mapping[st
     return tuple(normalized)
 
 
-def _select_chapters(chapters: tuple[dict[str, Any], ...], selector: str) -> tuple[dict[str, Any], ...]:
+def _select_chapters(
+    chapters: tuple[dict[str, Any], ...], selector: str
+) -> tuple[dict[str, Any], ...]:
     if not isinstance(selector, str) or not selector.strip():
-        raise _fail("chapter selector must be a non-empty string", code="audioexport.book_chapters_invalid")
+        raise _fail(
+            "chapter selector must be a non-empty string", code="audioexport.book_chapters_invalid"
+        )
     selector = selector.strip()
     by_number = {chapter["source_number"]: chapter for chapter in chapters}
     if selector == "all":
@@ -455,11 +491,14 @@ def _select_chapters(chapters: tuple[dict[str, Any], ...], selector: str) -> tup
     for component in selector.split(","):
         component = component.strip()
         if not component:
-            raise _fail("chapter selector contains an empty item", code="audioexport.book_chapters_invalid")
+            raise _fail(
+                "chapter selector contains an empty item", code="audioexport.book_chapters_invalid"
+            )
         match = re.fullmatch(r"([1-9][0-9]*)(?:-([1-9][0-9]*))?", component)
         if match is None:
             raise _fail(
-                f"invalid chapter selector item: {component}", code="audioexport.book_chapters_invalid"
+                f"invalid chapter selector item: {component}",
+                code="audioexport.book_chapters_invalid",
             )
         start = int(match.group(1))
         end = int(match.group(2) or start)
@@ -513,7 +552,9 @@ def resolve_book_export(
             f"unknown AudioCompose variant: {safe_variant}",
             code="audioexport.book_compose_report_missing",
         ) from exc
-    if not resolved_variant.is_dir() or os.path.commonpath((str(compose_root), str(resolved_variant))) != str(compose_root):
+    if not resolved_variant.is_dir() or os.path.commonpath(
+        (str(compose_root), str(resolved_variant))
+    ) != str(compose_root):
         raise _fail(
             "compose variant directory escapes the AudioCompose root",
             code="audioexport.book_compose_report_invalid",
@@ -531,9 +572,10 @@ def resolve_book_export(
                 f"compose report is missing selected chapter id {chapter['id']}",
                 code="audioexport.book_compose_item_missing",
             )
-        if item.get("source_number") != chapter["source_number"] or item_by_number.get(
-            chapter["source_number"]
-        ) is not item:
+        if (
+            item.get("source_number") != chapter["source_number"]
+            or item_by_number.get(chapter["source_number"]) is not item
+        ):
             raise _fail(
                 f"compose report identity does not match manifest chapter {chapter['id']}",
                 code="audioexport.book_compose_report_invalid",
@@ -550,6 +592,8 @@ def resolve_book_export(
                 code="audioexport.book_compose_report_invalid",
             )
         expected_hash = item.get("sha256")
+        if isinstance(expected_hash, str) and expected_hash.startswith("sha256:"):
+            expected_hash = expected_hash.removeprefix("sha256:")
         if not isinstance(expected_hash, str) or _SHA256_RE.fullmatch(expected_hash) is None:
             raise _fail(
                 f"compose item {chapter['id']} has an invalid sha256",
@@ -583,7 +627,9 @@ def resolve_book_export(
         name = name[: -len(".ssmdbook")]
     if not name:
         name = "book"
-    base_output = Path(output_root).expanduser() if output_root is not None else workspace / "audioexport"
+    base_output = (
+        Path(output_root).expanduser() if output_root is not None else workspace / "audioexport"
+    )
     if not base_output.is_absolute():
         base_output = Path.cwd() / base_output
     default_output = base_output.absolute() / safe_variant / f"{name}.m4b"
@@ -643,7 +689,10 @@ def _resolved_metadata(
         extras.update(overrides.extra)
     elif overrides is not None:
         if not isinstance(overrides, Mapping):
-            raise _fail("metadata must be AudiobookMetadata or a string mapping", code="audioexport.audiobook_metadata_invalid")
+            raise _fail(
+                "metadata must be AudiobookMetadata or a string mapping",
+                code="audioexport.audiobook_metadata_invalid",
+            )
         for key, value in overrides.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 raise _fail(
@@ -706,7 +755,9 @@ def export_book(
         if effective_channels is None:
             effective_channels = audiobook_profile.audio.channels
 
-    tracks = tuple(AudiobookTrack(chapter.path, title=chapter.title) for chapter in context.chapters)
+    tracks = tuple(
+        AudiobookTrack(chapter.path, title=chapter.title) for chapter in context.chapters
+    )
     audiobook = build_audiobook(
         tracks,
         destination,

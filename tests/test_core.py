@@ -118,10 +118,14 @@ def test_m4b_chapters_reado_and_metadata(wav: Path, tmp_path: Path, have_tools: 
     )
     target = tmp_path / "audiobook.m4b"
     result = encode(
-        wav, target, timeline=timeline, metadata={"title": "My Book", "artist": "The Author"}
+        wav,
+        target,
+        timeline=timeline,
+        metadata={"title": "My Book", "artist": "The Author", "language": "en-US"},
     )
     assert result.chapter_count == 2
     info = probe(target)
+    assert info["streams"][0]["tags"]["language"] == "eng"
     assert len(info["chapters"]) == 2
     assert info["chapters"][1]["tags"]["title"] == "Second;#="
     assert info["format"]["tags"]["title"] == "My Book"

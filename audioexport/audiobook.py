@@ -23,7 +23,7 @@ from .errors import EncodingError, InvalidExportError, VerificationError
 from .fftools import encoder_for_format, executable, probe, run, version
 from .formats import EXPECTED_CODECS, encoder_options, normalize_bitrate
 from .inputs import discover_audio_inputs, source_title
-from .metadata import AudiobookMetadata, audiobook_tags
+from .metadata import AudiobookMetadata, audiobook_tags, iso639_2_language_code
 from .pipeline import (
     _canonical_hash,
     _commit_export,
@@ -703,7 +703,10 @@ def _build_unlocked(
             )
         command.extend(["-c:a", "copy"])
         for key, value in tags.items():
-            command.extend(["-metadata", f"{key}={value}"])
+            if key == "language":
+                command.extend(["-metadata:s:a:0", f"language={iso639_2_language_code(value)}"])
+            else:
+                command.extend(["-metadata", f"{key}={value}"])
         command.extend(["-movflags", "+faststart", "-f", "ipod", str(final_temp)])
         try:
             run(command)

@@ -20,6 +20,7 @@ from .chapters import Chapter, ffmetadata_text, load_chapters, normalize_chapter
 from .errors import EncodingError, InvalidExportError, VerificationError
 from .fftools import encoder_for_format, executable, probe, run, version
 from .formats import EXPECTED_CODECS, FORMATS, encoder_options, normalize_bitrate, normalize_format
+from .metadata import iso639_2_language_code
 from .preflight import preflight_profile
 from .profile import load_profile
 from .validation import cover_kind as _cover_kind
@@ -281,6 +282,8 @@ def _verify_output(
             {key.lower(): value for key, value in stream.get("tags", {}).items()}
         )
     for key, expected_value in metadata.items():
+        if key.lower() == "language" and fmt in {"m4a", "m4b"}:
+            expected_value = iso639_2_language_code(expected_value)
         candidates = ("artist", "author") if key.lower() in {"artist", "author"} else (key.lower(),)
         if not any(normalized_tags.get(candidate) == expected_value for candidate in candidates):
             raise VerificationError(
@@ -511,7 +514,10 @@ def _encode_unlocked(
         elif fmt == "ogg":
             command.extend(["-qscale:a", "4"])
         for key, value in tags.items():
-            command.extend(["-metadata", f"{key}={value}"])
+            if key == "language" and fmt in {"m4a", "m4b"}:
+                command.extend(["-metadata:s:a:0", f"language={iso639_2_language_code(value)}"])
+            else:
+                command.extend(["-metadata", f"{key}={value}"])
         command.extend([*spec.extra_args, "-f", spec.muxer, str(temporary)])
         run(command)
         info = _verify_output(

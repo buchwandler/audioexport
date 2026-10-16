@@ -116,7 +116,6 @@ mode = "explicit"       # tracks | explicit | none
 
 Run it with `audioexport audiobook --profile audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file` override profile values; the TOML input order remains authoritative. `mode = "tracks"` (the default) creates one chapter per track; `mode = "explicit"` requires `chapters_file`; `mode = "none"` disables chapters. Existing `encode(..., format="m4b", timeline=...)` remains the right choice for Readio's prepared master and project timeline.
 
-
 ## Native `.ssmdbook` pipeline
 
 Use `export-book` when AudioCompose has already written a variant in a standard `.ssmdbook` workspace. It is the native book-workspace adapter; `audioexport audiobook` remains the generic standalone track/directory assembler, and `encode` remains for one prepared source with a timeline.
@@ -126,7 +125,9 @@ audiocompose compose-book . --variant "$VARIANT"
 audioexport export-book . --variant "$VARIANT"
 ```
 
-`export-book` reads `manifest.json` and `audiocompose/<variant>/compose-report.toml`, checks the selected report entries and WAV checksums/geometry, then delegates final M4B assembly and verification to AudioExport. It does not run AudioCompose, repair or synthesize chapters, or use Readio-specific state. Chapter selection accepts `all` (the default), a source number, an inclusive range, or comma-separated source numbers/ranges, for example `--chapters 5,7,11-13`. Selection follows manifest chapter order.
+`export-book` reads `manifest.json` and `audiocompose/<variant>/compose-report.toml`, accepts the producer's singular `[[item]]` tables (and legacy `[[items]]` tables), validates selected entries and WAV checksums/geometry with bare or `sha256:`-prefixed digests, then delegates final M4B assembly and verification to AudioExport. It does not run AudioCompose, repair or synthesize chapters, or use Readio-specific state. Chapter selection accepts `all` (the default), a source number, an inclusive range, or comma-separated source numbers/ranges, for example `--chapters 5,7,11-13`. Selection follows manifest chapter order.
+
+For M4A/M4B, language metadata is written on the audio track using ISO 639-2/T. BCP 47 tags such as `en-US` are normalized to their three-letter track code (`eng`).
 
 By default, output is written to `audioexport/<variant>/<workspace-name-without-.ssmdbook>.m4b` in the workspace. `--output` may override this; when an audiobook profile is supplied, its output is used unless `--output` is specified.
 

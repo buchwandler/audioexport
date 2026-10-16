@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any
 
+from langcodes import Language
+
 from .errors import InvalidExportError
 
 _CANONICAL_TO_FFMPEG = {
@@ -25,6 +27,22 @@ _CANONICAL_TO_FFMPEG = {
     "publisher": "publisher",
     "grouping": "grouping",
 }
+
+
+def iso639_2_language_code(value: str) -> str:
+    """Normalize a BCP 47 language tag to the ISO 639-2/T code used by MP4."""
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidExportError(
+            "language metadata must be a recognized BCP 47 or ISO 639 tag",
+            code="audioexport.audiobook_metadata_invalid",
+        )
+    try:
+        return Language.get(value.strip()).to_alpha3()
+    except (LookupError, ValueError) as exc:
+        raise InvalidExportError(
+            "language metadata must be a recognized BCP 47 or ISO 639 tag",
+            code="audioexport.audiobook_metadata_invalid",
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)

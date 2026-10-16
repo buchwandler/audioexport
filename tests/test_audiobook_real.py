@@ -44,7 +44,7 @@ def test_mixed_tracks_build_aac_audiobook_and_cache_respects_order(
     result = build_audiobook(
         [AudiobookTrack(second, title="Explicit second"), first],
         output,
-        metadata={"title": "The Book", "author": "A. Author"},
+        metadata={"title": "The Book", "author": "A. Author", "language": "en-US"},
     )
     info = probe(output)
     audio = [stream for stream in info["streams"] if stream.get("codec_type") == "audio"]
@@ -52,6 +52,7 @@ def test_mixed_tracks_build_aac_audiobook_and_cache_respects_order(
     assert audio[0]["codec_name"] == "aac"
     assert audio[0]["sample_rate"] == "44100"
     assert audio[0]["channels"] == 2
+    assert audio[0]["tags"]["language"] == "eng"
     assert result.track_count == 2
     assert result.chapter_count == 2
     assert [chapter["tags"]["title"] for chapter in info["chapters"]] == [
@@ -66,7 +67,7 @@ def test_mixed_tracks_build_aac_audiobook_and_cache_respects_order(
     reused = build_audiobook(
         [AudiobookTrack(second, title="Explicit second"), first],
         output,
-        metadata={"title": "The Book", "author": "A. Author"},
+        metadata={"title": "The Book", "author": "A. Author", "language": "en-US"},
     )
     assert reused.reused
     assert reused.export_id == result.export_id
@@ -74,7 +75,7 @@ def test_mixed_tracks_build_aac_audiobook_and_cache_respects_order(
     reordered = build_audiobook(
         [first, AudiobookTrack(second, title="Explicit second")],
         output,
-        metadata={"title": "The Book", "author": "A. Author"},
+        metadata={"title": "The Book", "author": "A. Author", "language": "en-US"},
     )
     assert not reordered.reused
     assert reordered.export_id != result.export_id

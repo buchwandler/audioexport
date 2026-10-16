@@ -14,7 +14,9 @@ from audioexport.errors import InvalidExportError, VerificationError
 VARIANT = "narration2--3b5f647f8f57"
 
 
-def _write_wav(path: Path, *, sample_rate: int = 8000, channels: int = 1, frames: int = 800) -> None:
+def _write_wav(
+    path: Path, *, sample_rate: int = 8000, channels: int = 1, frames: int = 800
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with wave.open(str(path), "wb") as target:
         target.setnchannels(channels)
@@ -29,10 +31,16 @@ def _report_text(
     format_name: str = "audiocompose-book-report",
     version: int = 1,
     variant: str = VARIANT,
+    item_table: str = "item",
 ) -> str:
-    lines = [f'format = {json.dumps(format_name)}', f"version = {version}", f"variant = {json.dumps(variant)}", ""]
+    lines = [
+        f"format = {json.dumps(format_name)}",
+        f"version = {version}",
+        f"variant = {json.dumps(variant)}",
+        "",
+    ]
     for item in items:
-        lines.append("[[items]]")
+        lines.append(f"[[{item_table}]]")
         for key, value in item.items():
             lines.append(f"{key} = {json.dumps(value)}")
         lines.append("")
@@ -77,7 +85,7 @@ def _workspace(tmp_path: Path) -> tuple[Path, list[dict[str, Any]]]:
                 "render_plan_id": f"plan-{chapter['source_number']}",
                 "manifest_id": "book-manifest-1",
                 "output": filename,
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "sha256": f"sha256:{hashlib.sha256(path.read_bytes()).hexdigest()}",
                 "sample_rate": 8000,
                 "channels": 1,
                 "frames": 800,
@@ -93,6 +101,31 @@ def _write_report(workspace: Path, items: list[dict[str, Any]], **kwargs: Any) -
     (workspace / "audiocompose" / VARIANT / "compose-report.toml").write_text(
         _report_text(items, **kwargs), encoding="utf-8"
     )
+
+
+def test_accepts_legacy_plural_items_table(tmp_path: Path) -> None:
+    workspace, items = _workspace(tmp_path)
+    _write_report(workspace, items, item_table="items")
+
+    result = resolve_book_export(workspace, variant=VARIANT)
+
+    assert [chapter.id for chapter in result.chapters] == [
+        "chapter-five",
+        "chapter-two",
+        "chapter-seven",
+    ]
+
+
+def test_rejects_ambiguous_compose_item_tables(tmp_path: Path) -> None:
+    workspace, _ = _workspace(tmp_path)
+    report_path = workspace / "audiocompose" / VARIANT / "compose-report.toml"
+    report_path.write_text(
+        report_path.read_text(encoding="utf-8") + '\n[[items]]\nid = "chapter-five"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(InvalidExportError, match="exactly one item or items array"):
+        resolve_book_export(workspace, variant=VARIANT)
 
 
 def test_resolves_workspace_and_preserves_manifest_order(tmp_path: Path) -> None:
@@ -139,7 +172,9 @@ def test_unknown_source_number_is_rejected(tmp_path: Path) -> None:
         resolve_book_export(workspace, variant=VARIANT, chapters="99")
 
 
-@pytest.mark.parametrize("variant", ["../other", "/tmp/variant", "foo/bar", r"foo\\bar", "C:variant"])
+@pytest.mark.parametrize(
+    "variant", ["../other", "/tmp/variant", "foo/bar", r"foo\\bar", "C:variant"]
+)
 def test_rejects_unsafe_variants(tmp_path: Path, variant: str) -> None:
     workspace, _ = _workspace(tmp_path)
     with pytest.raises(InvalidExportError, match="safe single directory component"):
@@ -157,13 +192,19 @@ def test_unknown_variant_and_missing_compose_report_are_rejected(tmp_path: Path)
 
 @pytest.mark.parametrize(
     ("format_name", "version", "reported_variant"),
-    [("other", 1, VARIANT), ("audiocompose-book-report", 2, VARIANT), ("audiocompose-book-report", 1, "other")],
+    [
+        ("other", 1, VARIANT),
+        ("audiocompose-book-report", 2, VARIANT),
+        ("audiocompose-book-report", 1, "other"),
+    ],
 )
 def test_rejects_report_format_version_and_variant_mismatch(
     tmp_path: Path, format_name: str, version: int, reported_variant: str
 ) -> None:
     workspace, items = _workspace(tmp_path)
-    _write_report(workspace, items, format_name=format_name, version=version, variant=reported_variant)
+    _write_report(
+        workspace, items, format_name=format_name, version=version, variant=reported_variant
+    )
 
     with pytest.raises(InvalidExportError, match="format, version, or variant"):
         resolve_book_export(workspace, variant=VARIANT)
@@ -192,12 +233,16 @@ def test_rejects_missing_selected_compose_item(tmp_path: Path) -> None:
 
 def test_rejects_failed_and_skipped_selected_items(tmp_path: Path) -> None:
     workspace, items = _workspace(tmp_path)
-    failed = [{**item, "status": "failed"} if item["source_number"] == 5 else item for item in items]
+    failed = [
+        {**item, "status": "failed"} if item["source_number"] == 5 else item for item in items
+    ]
     _write_report(workspace, failed)
     with pytest.raises(InvalidExportError, match="unusable compose status 'failed'"):
         resolve_book_export(workspace, variant=VARIANT, chapters="5")
 
-    skipped = [{**item, "status": "skipped"} if item["source_number"] == 5 else item for item in items]
+    skipped = [
+        {**item, "status": "skipped"} if item["source_number"] == 5 else item for item in items
+    ]
     _write_report(workspace, skipped)
     with pytest.raises(InvalidExportError, match="unusable compose status 'skipped'"):
         resolve_book_export(workspace, variant=VARIANT, chapters="5")
@@ -205,7 +250,10 @@ def test_rejects_failed_and_skipped_selected_items(tmp_path: Path) -> None:
 
 def test_rejects_traversal_and_symlink_report_outputs(tmp_path: Path) -> None:
     workspace, items = _workspace(tmp_path)
-    traversal = [{**item, "output": "../chapter.wav"} if item["source_number"] == 5 else item for item in items]
+    traversal = [
+        {**item, "output": "../chapter.wav"} if item["source_number"] == 5 else item
+        for item in items
+    ]
     _write_report(workspace, traversal)
     with pytest.raises(VerificationError, match="traversal components"):
         resolve_book_export(workspace, variant=VARIANT, chapters="5")
@@ -215,7 +263,9 @@ def test_rejects_traversal_and_symlink_report_outputs(tmp_path: Path) -> None:
     _write_wav(outside)
     link = variant_dir / "linked.wav"
     link.symlink_to(outside)
-    symlinked = [{**item, "output": "linked.wav"} if item["source_number"] == 5 else item for item in items]
+    symlinked = [
+        {**item, "output": "linked.wav"} if item["source_number"] == 5 else item for item in items
+    ]
     _write_report(workspace, symlinked)
     with pytest.raises(VerificationError, match="symlinks"):
         resolve_book_export(workspace, variant=VARIANT, chapters="5")
@@ -223,7 +273,9 @@ def test_rejects_traversal_and_symlink_report_outputs(tmp_path: Path) -> None:
 
 def test_rejects_hash_and_wav_geometry_mismatches(tmp_path: Path) -> None:
     workspace, items = _workspace(tmp_path)
-    bad_hash = [{**item, "sha256": "0" * 64} if item["source_number"] == 5 else item for item in items]
+    bad_hash = [
+        {**item, "sha256": "0" * 64} if item["source_number"] == 5 else item for item in items
+    ]
     _write_report(workspace, bad_hash)
     with pytest.raises(VerificationError, match="checksum"):
         resolve_book_export(workspace, variant=VARIANT, chapters="5")
@@ -260,7 +312,6 @@ def test_rejects_non_wav_composed_artifact(tmp_path: Path) -> None:
 
     with pytest.raises(VerificationError, match="not a readable WAV"):
         resolve_book_export(workspace, variant=VARIANT, chapters="5")
-
 
 
 def test_public_export_book_applies_profile_and_explicit_precedence(
@@ -344,7 +395,11 @@ def test_public_export_book_applies_profile_and_explicit_precedence(
         publisher="Example Press",
         language="en",
     )
-    assert (profile_kwargs["bitrate"], profile_kwargs["sample_rate"], profile_kwargs["channels"]) == (
+    assert (
+        profile_kwargs["bitrate"],
+        profile_kwargs["sample_rate"],
+        profile_kwargs["channels"],
+    ) == (
         "96k",
         44100,
         2,
@@ -381,7 +436,10 @@ def test_export_book_uses_manifest_defaults_and_deterministic_output(
     monkeypatch.setattr(book_module, "build_audiobook", fake_build)
     result = export_book(workspace, variant=VARIANT)
 
-    assert captured["output"] == workspace / "audioexport" / VARIANT / "Platform Decay - Martha Wells.m4b"
+    assert (
+        captured["output"]
+        == workspace / "audioexport" / VARIANT / "Platform Decay - Martha Wells.m4b"
+    )
     assert captured["kwargs"]["metadata"] == AudiobookMetadata(
         title="Platform Decay", author="Martha Wells", publisher="Example Press", language="en"
     )

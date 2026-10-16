@@ -88,7 +88,6 @@ def _parser() -> argparse.ArgumentParser:
     audiobook.add_argument("--ffmpeg")
     audiobook.add_argument("--ffprobe")
 
-
     export_book_parser = sub.add_parser(
         "export-book", help="Export a composed .ssmdbook variant as one M4B audiobook"
     )
@@ -138,8 +137,6 @@ def _print(payload: Any, *, as_json: bool) -> None:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-
-
 def _print_book_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
     if as_json:
         _print(payload, as_json=True)
@@ -156,6 +153,7 @@ def _print_book_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
         f"{payload['codec']}/{payload['sample_rate']} Hz/{payload['channels']}"
     )
     print(f"reused: {'yes' if payload['reused'] else 'no'}")
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
@@ -267,7 +265,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"could not read audiobook verification sidecar: {exc}",
                     code="audioexport.audiobook_manifest_invalid",
                 ) from exc
-            verified = sidecar_payload.get("verified", {}) if isinstance(sidecar_payload, Mapping) else {}
+            verified = (
+                sidecar_payload.get("verified", {}) if isinstance(sidecar_payload, Mapping) else {}
+            )
             if not isinstance(verified, Mapping):
                 verified = {}
             duration_ms = book_result.audiobook.duration_ms
@@ -277,7 +277,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "selected_chapters": list(book_result.selected_chapter_ids),
                 "selected_chapter_ids": list(book_result.selected_chapter_ids),
                 "input_compose_report": str(
-                    book_result.workspace / "audiocompose" / book_result.variant / "compose-report.toml"
+                    book_result.workspace
+                    / "audiocompose"
+                    / book_result.variant
+                    / "compose-report.toml"
                 ),
                 "output": str(book_result.output),
                 "sidecar": str(book_result.sidecar),
