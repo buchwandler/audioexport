@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any
 
-from langcodes import Language  # type: ignore[import-not-found]
+from langcodes import Language
 
 from .errors import InvalidExportError
 
