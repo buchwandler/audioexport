@@ -1,6 +1,6 @@
 # audioexport
 
-An independent Python library and command-line interface for exporting audio through **FFmpeg**. This is the first extraction step from Readio's output/encoding subsystem, but **audioexport does not import or install Readio, AudioCompose, UtterPlan, or synthesis engines**.
+AudioExport is a standalone Python library and CLI for verified FFmpeg audio export.
 
 Supported formats: WAV (PCM16), FLAC, MP3, M4A (AAC), M4B (AAC audiobook), OGG (Vorbis), and Opus. Handles tagged metadata, embedded JPEG/PNG cover art for MP3/M4A/M4B, JSON chapter timelines for M4A/M4B, standalone ordered multi-track audiobook assembly, FFprobe verification, artifact identities and safe reuse.
 
@@ -24,7 +24,7 @@ audioexport doctor --json
 
 `doctor` reports package/tool versions and encoder availability per format. Its existing `ready` key means FFmpeg and FFprobe are present; `all_formats_ready` and each `formats` entry report encoder capability and a reason when unavailable. The additive `features` entries report `m4b_encode`, `m4b_audiobook`, and `m4b_stream_copy` availability; missing optional capabilities do not make `ready` false. `run_profile()` checks the encoders selected by the profile before writing outputs.
 
-Base Python dependencies are `langcodes>=3.3` on all supported versions and `tomli>=2` on Python 3.10. FFmpeg/FFprobe are external executables; AudioExport does not install or import Readio, AudioCompose, UtterPlan, VoiceRender, soundfile, or NumPy.
+Base Python dependencies are `langcodes>=3.3` on all supported versions and `tomli>=2` on Python 3.10. FFmpeg/FFprobe are external executables; AudioExport has no runtime dependency on synthesis, planning, or composition packages.
 
 ## CLI quickstart
 
@@ -63,7 +63,7 @@ audioexport audiobook book-tracks/ -o book.m4b \
 audioexport audiobook 01-intro.mp3 02-chapter-one.flac 03-chapter-two.wav \
   -o book.m4b --bitrate 96k --language eng
 
-# Explicit chapter starts from chapters.txt or the existing JSON/Readio timeline format.
+# Explicit chapter starts from chapters.txt or a generic JSON timeline.
 audioexport audiobook book-tracks/ -o book.m4b --chapters-file chapters.txt
 ```
 
@@ -114,7 +114,7 @@ mode = "explicit"       # tracks | explicit | none
 # title_source = "tag"  # tag (falls back to filename) | filename
 ```
 
-Run it with `audioexport audiobook --profile audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file` override profile values; the TOML input order remains authoritative. `mode = "tracks"` (the default) creates one chapter per track; `mode = "explicit"` requires `chapters_file`; `mode = "none"` disables chapters. Existing `encode(..., format="m4b", timeline=...)` remains the right choice for Readio's prepared master and project timeline.
+Run it with `audioexport audiobook --profile audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file` override profile values; the TOML input order remains authoritative. `mode = "tracks"` (the default) creates one chapter per track; `mode = "explicit"` requires `chapters_file`; `mode = "none"` disables chapters. Existing `encode(..., format="m4b", timeline=...)` remains the right choice for one prepared source with caller-supplied chapters.
 
 ## Native `.ssmdbook` pipeline
 
@@ -125,13 +125,45 @@ audiocompose compose-book . --variant "$VARIANT"
 audioexport export-book . --variant "$VARIANT"
 ```
 
-`export-book` reads `manifest.json` and `audiocompose/<variant>/compose-report.toml`, accepts the producer's singular `[[item]]` tables (and legacy `[[items]]` tables), validates selected entries and WAV checksums/geometry with bare or `sha256:`-prefixed digests, then delegates final M4B assembly and verification to AudioExport. It does not run AudioCompose, repair or synthesize chapters, or use Readio-specific state. Chapter selection accepts `all` (the default), a source number, an inclusive range, or comma-separated source numbers/ranges, for example `--chapters 5,7,11-13`. Selection follows manifest chapter order.
+`export-book` reads `manifest.json` and `audiocompose/<variant>/compose-report.toml`, accepts singular `[[item]]` or plural `[[items]]` report tables, validates selected entries and WAV checksums/geometry with bare or `sha256:`-prefixed digests, then delegates final M4B assembly and verification to AudioExport. It does not run AudioCompose, repair or synthesize chapters. Chapter selection accepts `all` (the default), a source number, an inclusive range, or comma-separated source numbers/ranges, for example `--chapters 5,7,11-13`. Selection follows manifest chapter order.
 
 For M4A/M4B, language metadata is written on the audio track using ISO 639-2/T. BCP 47 tags such as `en-US` are normalized to their three-letter track code (`eng`).
 
 By default, output is written to `audioexport/<variant>/<workspace-name-without-.ssmdbook>.m4b` in the workspace. `--output` may override this; when an audiobook profile is supplied, its output is used unless `--output` is specified.
 
 Metadata precedence is **manifest metadata < audiobook profile metadata < explicit CLI/API metadata**. Audio settings use **AudioExport defaults < audiobook profile < explicit CLI/API flags**. Thus explicit metadata fields replace matching profile/manifest values, profile values replace manifest defaults, and unset values continue to fall through. Explicit cover and audio flags override corresponding profile settings. The profile's inputs and chapter configuration do not replace the variant chapters selected from the compose report.
+
+## Native `.ssmdoc` export
+
+Use `export-document` after AudioCompose has produced a document variant. AudioExport reads only the direct AudioCompose handoff, verifies its report, WAV digest, and geometry, then delegates final encoding to the generic pipeline:
+
+```bash
+audiocompose compose-document story.ssmdoc --variant "$VARIANT"
+audioexport export-document story.ssmdoc \
+  --variant "$VARIANT" \
+  --format mp3 \
+  --title "Story" --artist "An Author"
+```
+
+The input is `audiocompose/<variant>/compose-report.toml` and its verified `document-0001.wav`. By default, output and the adjacent `.audioexport.json` sidecar go to `audioexport/<variant>/<workspace-name>.<format>` (for example, `audioexport/<variant>/story.mp3`). The exact variant and output format are explicit; an output filename extension can supply the format instead. Metadata, cover art, and a generic chapter timeline are caller-supplied; document headings and manifest fields are not inferred as tags or chapters.
+
+Python callers can separate read-only verification from encoding:
+
+```python
+from audioexport import export_document, resolve_document_export
+
+context = resolve_document_export("story.ssmdoc", variant=variant)
+print(context.document.sha256)
+result = export_document(
+    "story.ssmdoc",
+    variant=variant,
+    format="mp3",
+    metadata={"title": "Story", "artist": "An Author"},
+)
+print(result.output, result.export.reused)
+```
+
+AudioExport does not run AudioCompose, synthesize audio, or inspect earlier pipeline stages. It has no runtime dependency on planning, synthesis, or composition packages.
 
 If `--output` is not set for `encode`, the output filename defaults to the input stem and chosen format. To avoid destroying the input, encoding input and output to the same real path is always rejected.
 
@@ -170,7 +202,7 @@ print(probe("exported/book.m4b")["chapters"])
 
 You may import the same public functions from `audioexport.api` as well as from `audioexport`.
 
-The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult`; `build_audiobook()` returns an `AudiobookResult`; `export_book()` and `resolve_book_export()` provide verified composed-book export through `BookExportContext`, `BookExportResult`, and `ComposedChapter`. These symbols, like the other public functions, are available from both `audioexport` and `audioexport.api`.
+The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult`; `build_audiobook()` returns an `AudiobookResult`; `export_book()` and `resolve_book_export()` provide verified composed-book export. `resolve_document_export()` performs read-only SSMDDoc verification, while `export_document()` verifies and encodes through `ComposedDocument`, `DocumentExportContext`, and `DocumentExportResult`. These symbols are available from both `audioexport` and `audioexport.api`.
 
 ## Export profile
 
@@ -246,7 +278,7 @@ resolved_outputs = preflight_profile(profile, source)
 
 for resolved in resolved_outputs:
     target = Path("exports") / resolved.filename
-    # A consumer such as Readio performs its target/ownership/overwrite checks here.
+    # Applications should perform their own target and overwrite checks here.
     result = encode(
         source,
         target,
@@ -258,7 +290,7 @@ for resolved in resolved_outputs:
     )
 ```
 
-A consumer may instead call `resolve_output()` for a single selected spec; use full-profile preflight when the operation requires every configured output validated. Preflight is not an ownership authorization: Readio remains responsible for project locks and freshness, destination selection and collision/ownership checks, overwrite authorization, state/index updates, result types, and partial-batch bookkeeping. Call `encode()` only after those consumer-owned checks pass. `ResolvedOutput`, `resolve_output`, and `preflight_profile` are available from both `audioexport` and `audioexport.api`.
+A consumer may instead call `resolve_output()` for a single selected spec; use full-profile preflight when the operation requires every configured output validated. Preflight is not an ownership authorization: applications remain responsible for their own locks, target selection, overwrite authorization, and state updates. Call `encode()` only after those consumer-owned checks pass. `ResolvedOutput`, `resolve_output`, and `preflight_profile` are available from both `audioexport` and `audioexport.api`.
 
 ## Chapters/timeline
 
@@ -275,7 +307,7 @@ Use an independent JSON file such as [`examples/chapters.json`](examples/chapter
 
 `end_ms` is optional; without it, chapter ends are the next chapter start or the audio duration. Chapter offsets must be strictly increasing and within the audio file. FFmpeg metadata escaping is handled internally. Embedded chapter markers are currently supported for **M4A and M4B**.
 
-For an incremental Readio migration, the same `--timeline` API also reads **Readio's `readio.composition-timeline` JSON** with `sample_rate` and chapter `start_sample`. FFmetadata is constructed with its original sample timebase for precision, with generic millisecond chapter fields available for non-Readio workflows.
+Exact-sample timelines may include a top-level `sample_rate` and chapter `start_sample` values. FFmetadata preserves their original sample timebase and coordinates using `TIMEBASE=1/<sample_rate>`.
 
 ## Integrity and versioning
 
@@ -286,10 +318,6 @@ Encoding uses argument-vector subprocess calls (`shell=False`) and stages both a
 Version is dynamic through `setuptools-scm`: `pyproject.toml` has no static `version` field, and Git tags determine wheel/sdist metadata, `audioexport.__version__`, and CLI output. The project supports Python 3.10+ and retains the flat `audioexport/` layout. Unversioned archives use a development fallback; a fallback build must never be treated as final `0.1.2`.
 
 For a release, first commit the code and wait for the complete Linux/Windows/macOS, Python 3.10–3.14 CI matrix, including its Sphinx warning-as-error documentation build. Then create and push the intended version tag (for example `v0.1.2`). Manually dispatch the GitHub Actions workflow named **Release** with that existing tag. It reruns the full supported-Python test matrix, checks the tag against wheel/sdist metadata, inspects package contents, installs the wheel outside the checkout, and checks CLI/API version parity. Publishing uses the configured `PYPI_API_TOKEN` secret after approval in the `pypi` GitHub environment; repository administrators must ensure the token and environment approval rules are configured. Do not publish from an untagged/fallback build.
-
-## Readio migration
-
-**Readio is deliberately not patched by this project.** Its existing export commands continue using their current code until an opt-in bridge is tested. A future integration must call AudioExport's Python library API; it must never launch the `audioexport` CLI as a subprocess. See [`docs/readio-migration.md`](docs/readio-migration.md) for the compatibility boundary, integration order, and rollback rules. Readio continues owning project locks, path defaults, staleness, indexed state, and orchestration.
 
 ## Tests
 
@@ -306,11 +334,11 @@ python scripts/check_package_artifacts.py
 audioexport doctor --json
 ```
 
-Tests cover seven real formats in one profile, mixed-format audiobook assembly, 100-track ordering/chapters, audiobook cache invalidation, M4A/M4B chapters and covers, Readio sample timelines, malformed probes, encoder availability, transactional failure recovery, no-clobber behavior, and concurrent writers. Normal CI runs Python 3.10–3.14 on Linux, Windows, and macOS, and checks tests, lint, formatting, typing, build metadata, Twine, package contents, and isolated wheel installation. CI also builds the Sphinx documentation on Linux/Python 3.13 with warnings treated as errors. The manually dispatched **Release** workflow retests the full supported Python range before packaging and API-token publishing. Cross-platform encoder availability depends on the FFmpeg build installed by each runner.
+Tests cover seven real formats in one profile, mixed-format audiobook assembly, 100-track ordering/chapters, audiobook cache invalidation, M4A/M4B chapters and covers, exact-sample chapter timelines, malformed probes, encoder availability, transactional failure recovery, no-clobber behavior, and concurrent writers. Normal CI runs Python 3.10–3.14 on Linux, Windows, and macOS, and checks tests, lint, formatting, typing, build metadata, Twine, package contents, and isolated wheel installation. CI also builds the Sphinx documentation on Linux/Python 3.13 with warnings treated as errors. The manually dispatched **Release** workflow retests the full supported Python range before packaging and API-token publishing. Cross-platform encoder availability depends on the FFmpeg build installed by each runner.
 
 ## Limitations (MVP)
 
-No audio mastering, TTS, audio mixing, streaming PCM API, FFmpeg filter graphs, network service, or GUI. No automatic conversion of Readio project configs, legacy export cache, or Audiocompose timeline semantics other than chapter starts. Encoder output may vary across FFmpeg versions; the cache key includes tool versions. Chapter verification has a small tolerance for FFmpeg container timebase rounding. Standalone encoding does not modify Readio projects.
+No audio mastering, TTS, audio mixing, streaming PCM API, FFmpeg filter graphs, network service, or GUI. Encoder output may vary across FFmpeg versions; the export identity includes tool versions. Chapter verification tolerates small FFmpeg container timebase rounding.
 
 ## License
 

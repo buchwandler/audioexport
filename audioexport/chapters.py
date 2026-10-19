@@ -1,4 +1,4 @@
-"""Portable chapter input plus optional Readio composition-timeline adapter."""
+"""Portable chapter input with millisecond and exact-sample coordinates."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ class Chapter:
 
 
 def escape_ffmetadata_value(value: str) -> str:
-    """Ported from Readio: escape FFmetadata delimiters and newlines."""
+    """Escape delimiters and newlines for FFmetadata values."""
     value = value.replace("\\", "\\\\").replace("=", "\\=")
     value = value.replace(";", "\\;").replace("#", "\\#")
     return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
@@ -42,7 +42,7 @@ def _milliseconds(value: Any, field: str) -> int:
 
 
 def load_chapters(timeline: Path | str) -> tuple[Chapter, ...]:
-    """Read JSON {chapters: [{title,start_ms,end_ms?}]} or Readio start_sample timeline."""
+    """Read JSON chapters with start_ms, or sample_rate and start_sample."""
     path = Path(timeline)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

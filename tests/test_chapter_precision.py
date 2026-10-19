@@ -19,7 +19,6 @@ def test_sample_chapter_precision_and_escaping(
     timeline.write_text(
         json.dumps(
             {
-                "format": "readio.composition-timeline",
                 "sample_rate": sample_rate,
                 "chapters": [
                     {"title": "Intro", "start_sample": 0},

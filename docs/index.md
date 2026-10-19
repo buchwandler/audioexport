@@ -2,14 +2,13 @@
 
 `audioexport` is a standalone Python library and command-line interface for
 exporting audio through FFmpeg. It accepts any FFmpeg-decodable audio source
-and produces reproducible, verified output artifacts without importing Readio,
-AudioCompose, UtterPlan, or a synthesis engine.
+and produces reproducible, verified output artifacts with no runtime dependencies on
+planning, synthesis, or composition packages.
 
 ```{toctree}
 :maxdepth: 2
 :caption: Documentation
 
-readio-migration
 changelog
 ```
 
@@ -127,7 +126,27 @@ result = export_book(
 print(result.output, result.selected_chapter_ids)
 ```
 
-`BookExportContext`, `BookExportResult`, and `ComposedChapter` describe resolved inputs and export results. This adapter does not run AudioCompose or modify Readio project state.
+`BookExportContext`, `BookExportResult`, and `ComposedChapter` describe resolved inputs and export results. This adapter consumes the immediate AudioCompose handoff and does not modify upstream pipeline stages.
+
+## Native `.ssmdoc` export
+
+`export-document` consumes the immediate `audiocompose/<variant>/compose-report.toml` and its verified `document-0001.wav`. It validates the SSMDDoc v1 manifest, exact variant, report status, output path, digest, and WAV geometry, then delegates final output to the generic encoder. Earlier stage directories are not required.
+
+```bash
+audioexport export-document story.ssmdoc \
+  --variant "$VARIANT" \
+  --format mp3 \
+  --title "Story"
+```
+
+The default output is `audioexport/<variant>/<workspace-name>.<format>` with the standard adjacent AudioExport sidecar. The caller selects the exact variant and a format or output extension; tags, cover art, and a generic timeline are explicit inputs.
+
+```python
+from audioexport import export_document, resolve_document_export
+
+context = resolve_document_export("story.ssmdoc", variant=variant)  # read-only
+result = export_document("story.ssmdoc", variant=variant, format="mp3")
+```
 
 ## Python API
 
@@ -158,6 +177,7 @@ Important public entry points include:
 - `run_profile()` for multiple configured outputs
 - `build_audiobook()` for ordered-track assembly
 - `export_book()` and `resolve_book_export()` for verified composed-book export; `BookExportContext`, `BookExportResult`, and `ComposedChapter` describe its public results
+- `export_document()` and `resolve_document_export()` for verified composed-document export; `ComposedDocument`, `DocumentExportContext`, and `DocumentExportResult` describe its inputs and results
 - `preflight_profile()` for read-only profile validation
 - `doctor()` and `probe()` for tool and artifact diagnostics
 - `load_profile()` and `load_audiobook_profile()` for TOML profiles
@@ -182,6 +202,4 @@ by a per-target process lock.
 
 - [`README.md`](https://github.com/buchwandler/audioexport/blob/main/README.md) —
   complete usage reference and examples
-- [Readio migration notes](readio-migration.md) — compatibility boundaries and
-  the planned integration shape
 - [Changelog](changelog.md) — release history

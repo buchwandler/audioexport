@@ -6,17 +6,12 @@ validates selected WAV files and then delegates assembly to ``build_audiobook``.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import math
-import os
 import re
-import stat
 import sys
-import wave
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 if sys.version_info >= (3, 11):
@@ -24,12 +19,12 @@ if sys.version_info >= (3, 11):
 else:  # pragma: no cover - Python 3.10
     import tomli as tomllib
 
+from . import _workspace
 from .audiobook import AudiobookResult, AudiobookTrack, build_audiobook
 from .audiobook_profile import AudiobookProfile, load_audiobook_profile
 from .errors import InvalidExportError, VerificationError
 from .metadata import AudiobookMetadata, audiobook_tags
 
-_DURATION_TOLERANCE_SECONDS = 0.01
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -192,24 +187,7 @@ def _validate_metadata(payload: Mapping[str, Any]) -> None:
 
 
 def _safe_variant(variant: str) -> str:
-    if not isinstance(variant, str) or not variant or variant in {".", ".."}:
-        raise _fail(
-            "variant must be a safe single directory component",
-            code="audioexport.book_variant_invalid",
-        )
-    if (
-        "/" in variant
-        or "\\" in variant
-        or "\x00" in variant
-        or ":" in variant
-        or PureWindowsPath(variant).is_absolute()
-        or any(ord(character) < 32 for character in variant)
-    ):
-        raise _fail(
-            "variant must be a safe single directory component",
-            code="audioexport.book_variant_invalid",
-        )
-    return variant
+    return _workspace.safe_variant(variant, error_code="audioexport.book_variant_invalid")
 
 
 def _workspace_for(book: str | Path) -> Path:
@@ -247,150 +225,32 @@ def _workspace_for(book: str | Path) -> Path:
 
 
 def _report_root(workspace: Path, audiocompose_root: str | Path | None) -> Path:
-    root = (
-        Path(audiocompose_root).expanduser()
-        if audiocompose_root is not None
-        else workspace / "audiocompose"
+    return _workspace.resolve_stage_root(
+        workspace,
+        audiocompose_root,
+        stage_name="audiocompose",
+        missing_code="audioexport.book_compose_report_missing",
+        invalid_code="audioexport.book_compose_report_invalid",
     )
-    if not root.is_absolute():
-        root = workspace / root
-    try:
-        resolved = root.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise _fail(
-            f"AudioCompose directory does not exist: {root}",
-            code="audioexport.book_compose_report_missing",
-        ) from exc
-    if not resolved.is_dir() or root.is_symlink():
-        raise _fail(
-            f"AudioCompose root must be a non-symlink directory: {root}",
-            code="audioexport.book_compose_report_invalid",
-        )
-    return resolved
 
 
 def _safe_report_file(variant_dir: Path, reported: Any) -> Path:
-    if not isinstance(reported, str) or not reported or "\x00" in reported or "\\" in reported:
-        raise VerificationError(
-            "compose report output must be a relative POSIX path",
-            code="audioexport.book_compose_output_invalid",
-        )
-    relative = Path(reported)
-    windows = PureWindowsPath(reported)
-    if relative.is_absolute() or windows.is_absolute() or windows.drive:
-        raise VerificationError(
-            "compose report output must be relative to its variant directory",
-            code="audioexport.book_compose_output_invalid",
-        )
-    if any(part in {"", ".", ".."} for part in reported.split("/")):
-        raise VerificationError(
-            "compose report output must not contain traversal components",
-            code="audioexport.book_compose_output_invalid",
-        )
-    candidate = variant_dir / relative
-    current = variant_dir
-    try:
-        for part in relative.parts:
-            current = current / part
-            if current.is_symlink():
-                raise VerificationError(
-                    "compose report output must not traverse symlinks",
-                    code="audioexport.book_compose_output_invalid",
-                )
-        resolved = candidate.resolve(strict=True)
-    except VerificationError:
-        raise
-    except (OSError, RuntimeError) as exc:
-        raise VerificationError(
-            f"compose report output does not resolve to a regular file: {reported}",
-            code="audioexport.book_compose_output_invalid",
-        ) from exc
-    try:
-        if os.path.commonpath((str(variant_dir), str(resolved))) != str(variant_dir):
-            raise VerificationError(
-                "compose report output escapes its variant directory",
-                code="audioexport.book_compose_output_invalid",
-            )
-    except ValueError as exc:
-        raise VerificationError(
-            "compose report output is outside its variant directory",
-            code="audioexport.book_compose_output_invalid",
-        ) from exc
-    try:
-        mode = resolved.lstat().st_mode
-    except OSError as exc:
-        raise VerificationError(
-            f"compose report output is unavailable: {reported}",
-            code="audioexport.book_compose_output_invalid",
-        ) from exc
-    if not stat.S_ISREG(mode):
-        raise VerificationError(
-            f"compose report output must be a regular non-symlink file: {reported}",
-            code="audioexport.book_compose_output_invalid",
-        )
-    return resolved
+    return _workspace.safe_report_file(
+        variant_dir, reported, error_code="audioexport.book_compose_output_invalid"
+    )
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError as exc:
-        raise VerificationError(
-            f"cannot hash composed WAV {path}", code="audioexport.book_compose_hash_mismatch"
-        ) from exc
-    return digest.hexdigest()
+    return _workspace.sha256_file(path, error_code="audioexport.book_compose_hash_mismatch")
 
 
 def _verify_wav(path: Path, item: Mapping[str, Any]) -> tuple[int, int, int, float]:
-    expected_rate = _positive_int(
-        item.get("sample_rate"),
-        "compose item sample_rate",
-        code="audioexport.book_compose_report_invalid",
+    return _workspace.verify_reported_wav(
+        path,
+        item,
+        report_code="audioexport.book_compose_report_invalid",
+        geometry_code="audioexport.book_compose_geometry_mismatch",
     )
-    expected_channels = _positive_int(
-        item.get("channels"),
-        "compose item channels",
-        code="audioexport.book_compose_report_invalid",
-    )
-    expected_frames = _positive_int(
-        item.get("frames"), "compose item frames", code="audioexport.book_compose_report_invalid"
-    )
-    duration = item.get("duration_seconds")
-    if (
-        isinstance(duration, bool)
-        or not isinstance(duration, (int, float))
-        or not math.isfinite(float(duration))
-        or duration <= 0
-    ):
-        raise _fail(
-            "compose item duration_seconds must be a positive finite number",
-            code="audioexport.book_compose_report_invalid",
-        )
-    try:
-        with wave.open(str(path), "rb") as source:
-            actual_rate = source.getframerate()
-            actual_channels = source.getnchannels()
-            actual_frames = source.getnframes()
-    except (OSError, EOFError, wave.Error) as exc:
-        raise VerificationError(
-            f"composed artifact is not a readable WAV file: {path}",
-            code="audioexport.book_compose_geometry_mismatch",
-        ) from exc
-    actual_duration = actual_frames / actual_rate if actual_rate > 0 else 0.0
-    if (
-        actual_rate != expected_rate
-        or actual_channels != expected_channels
-        or actual_frames != expected_frames
-        or abs(actual_duration - float(duration)) > _DURATION_TOLERANCE_SECONDS
-    ):
-        raise VerificationError(
-            f"composed WAV geometry does not match the report: {path}",
-            code="audioexport.book_compose_geometry_mismatch",
-        )
-    return actual_rate, actual_channels, actual_frames, actual_duration
 
 
 def _read_compose_report(path: Path, requested_variant: str) -> tuple[Mapping[str, Any], ...]:
@@ -552,9 +412,9 @@ def resolve_book_export(
             f"unknown AudioCompose variant: {safe_variant}",
             code="audioexport.book_compose_report_missing",
         ) from exc
-    if not resolved_variant.is_dir() or os.path.commonpath(
-        (str(compose_root), str(resolved_variant))
-    ) != str(compose_root):
+    if not resolved_variant.is_dir() or not _workspace.path_is_within(
+        compose_root, resolved_variant
+    ):
         raise _fail(
             "compose variant directory escapes the AudioCompose root",
             code="audioexport.book_compose_report_invalid",

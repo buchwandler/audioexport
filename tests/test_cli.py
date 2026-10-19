@@ -300,3 +300,158 @@ def test_cli_export_book_end_to_end_json_human_reuse_and_force(
     forced = _run(*arguments, "--force", "--json")
     assert forced.returncode == 0, forced.stderr
     assert json.loads(forced.stdout)["reused"] is False
+
+
+def _document_fixture(tmp_path: Path, wav: Path) -> tuple[Path, str]:
+    variant = "printer-cast--28f616b6fe3b"
+    workspace = tmp_path / "story.ssmdoc"
+    workspace.mkdir()
+    (workspace / "manifest.json").write_text(
+        json.dumps(
+            {
+                "format": "ssmdconvert.document",
+                "schema_version": 1,
+                "document": {"id": "document-0001", "path": "document.ssmd.md"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (workspace / "document.ssmd.md").write_text("# Story\n", encoding="utf-8")
+    variant_dir = workspace / "audiocompose" / variant
+    variant_dir.mkdir(parents=True)
+    artifact = variant_dir / "document-0001.wav"
+    shutil.copy2(wav, artifact)
+    report = {
+        "format": "audiocompose-document-report",
+        "version": 1,
+        "document_id": "document-0001",
+        "variant": variant,
+        "render_profile_id": "profile-id",
+        "source_plan_id": "source-plan-id",
+        "render_plan_id": "render-plan-id",
+        "render_manifest_id": "render-manifest-id",
+        "render_manifest_sha256": "render-manifest-sha",
+        "render_diagnostics_sha256": "render-diagnostics-sha",
+        "pause_policy_id": "pause-policy-id",
+        "pause_policy_provenance": "renderprofile",
+        "output_policy_id": "output-policy-id",
+        "audiojob_id": "audiojob-id",
+        "audiojob_schema_version": 2,
+        "audiocompose_version": "0.3.1",
+        "status": "written",
+        "output": artifact.name,
+        "sha256": f"sha256:{hashlib.sha256(artifact.read_bytes()).hexdigest()}",
+        "sample_rate": 24000,
+        "channels": 1,
+        "frames": 48000,
+        "duration_seconds": 2.0,
+    }
+    (variant_dir / "compose-report.toml").write_text(
+        "\n".join(f"{key} = {json.dumps(value)}" for key, value in report.items()) + "\n",
+        encoding="utf-8",
+    )
+    return workspace, variant
+
+
+def test_cli_export_document_json_human_reuse_and_metadata(
+    wav: Path, tmp_path: Path, have_tools: None
+) -> None:
+    workspace, variant = _document_fixture(tmp_path, wav)
+    arguments = (
+        "export-document",
+        str(workspace),
+        "--variant",
+        variant,
+        "--format",
+        "mp3",
+        "--metadata",
+        "title=metadata title",
+        "--title",
+        "CLI title",
+        "--artist",
+        "CLI artist",
+        "--album",
+        "CLI album",
+    )
+    first = _run(*arguments, "--json")
+    assert first.returncode == 0, first.stderr
+    result = json.loads(first.stdout)
+    output = workspace / "audioexport" / variant / "story.mp3"
+    assert result["workspace"] == str(workspace)
+    assert result["variant"] == variant
+    assert result["document_id"] == "document-0001"
+    assert result["input_compose_report"].endswith("compose-report.toml")
+    assert result["source"].endswith("document-0001.wav")
+    assert result["output"] == str(output)
+    assert Path(result["sidecar"]).is_file()
+    assert result["export_identity"].startswith("sha256:")
+    assert result["output_sha256"]
+    assert result["reused"] is False
+    assert not first.stdout.startswith("workspace:")
+
+    inspected = json.loads(_run("inspect", str(output), "--json").stdout)
+    tags = {key.lower(): value for key, value in inspected["format"].get("tags", {}).items()}
+    assert tags["title"] == "CLI title"
+    assert tags["artist"] == "CLI artist"
+    assert tags["album"] == "CLI album"
+
+    repeated = _run(*arguments, "--json")
+    assert repeated.returncode == 0, repeated.stderr
+    assert json.loads(repeated.stdout)["reused"] is True
+
+    human = _run(*arguments)
+    assert human.returncode == 0, human.stderr
+    for field in (
+        "workspace:",
+        "variant:",
+        "document: document-0001",
+        "input compose report:",
+        "source:",
+        "output:",
+        "export identity:",
+        "duration:",
+        "codec/sample-rate/channels:",
+        "reused: yes",
+    ):
+        assert field in human.stdout
+
+    inferred_output = tmp_path / "inferred.opus"
+    inferred = _run(
+        "export-document",
+        str(workspace),
+        "--variant",
+        variant,
+        "--output",
+        str(inferred_output),
+        "--json",
+    )
+    assert inferred.returncode == 0, inferred.stderr
+    inferred_payload = json.loads(inferred.stdout)
+    assert inferred_payload["format"] == "opus"
+    assert inferred_payload["output"] == str(inferred_output)
+
+
+def test_cli_export_document_errors_are_json_and_stable(tmp_path: Path) -> None:
+    result = _run(
+        "export-document",
+        str(tmp_path / "bad.ssmdoc"),
+        "--variant",
+        "v1",
+        "--format",
+        "mp3",
+        "--json",
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == ""
+    payload = json.loads(result.stdout)
+    assert payload["error"]["code"] == "audioexport.document_workspace_invalid"
+    assert payload["error"]["message"]
+
+
+def test_cli_export_document_requires_format_or_output(wav: Path, tmp_path: Path) -> None:
+    workspace, variant = _document_fixture(tmp_path, wav)
+    result = _run("export-document", str(workspace), "--variant", variant, "--json")
+
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["error"]["code"] == "audioexport.document_format_required"

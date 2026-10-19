@@ -12,6 +12,13 @@ from .book import (
     resolve_book_export,
 )
 from .chapters import Chapter, load_chapters
+from .document import (
+    ComposedDocument,
+    DocumentExportContext,
+    DocumentExportResult,
+    export_document,
+    resolve_document_export,
+)
 from .errors import (
     AudioExportError,
     EncodingError,
@@ -38,6 +45,9 @@ __all__ = [
     "BookExportResult",
     "Chapter",
     "ComposedChapter",
+    "ComposedDocument",
+    "DocumentExportContext",
+    "DocumentExportResult",
     "EncodingError",
     "ExportProfile",
     "ExportResult",
@@ -50,6 +60,7 @@ __all__ = [
     "doctor",
     "encode",
     "export_book",
+    "export_document",
     "load_audiobook_profile",
     "load_chapters",
     "load_profile",
@@ -57,6 +68,7 @@ __all__ = [
     "preflight_profile",
     "probe",
     "resolve_book_export",
+    "resolve_document_export",
     "resolve_output",
     "run_profile",
 ]

@@ -1,4 +1,4 @@
-"""Explicit FFmpeg encoder/container policy, not Readio-dependent."""
+"""Explicit FFmpeg encoder and container policy."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def normalize_bitrate(value: str | int | None, fmt: str) -> str | None:
         raise InvalidExportError(
             f"bitrate is not supported for {fmt}", code="audioexport.bitrate_unsupported"
         )
-    # Adapted from Readio's normalize_bitrate, with a strict integer bits/s form.
+    # Bare values are bits/s; k and m suffixes specify their units.
     text = str(value).strip()
     match = re.fullmatch(r"(\d+)([kKmM]?)", text)
     if match is None or int(match[1]) <= 0:

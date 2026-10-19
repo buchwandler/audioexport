@@ -7,12 +7,17 @@ from audioexport import (
     BookExportContext,
     BookExportResult,
     ComposedChapter,
+    ComposedDocument,
+    DocumentExportContext,
+    DocumentExportResult,
     api,
     build_audiobook,
     encode,
     export_book,
+    export_document,
     preflight_profile,
     resolve_book_export,
+    resolve_document_export,
     resolve_output,
 )
 
@@ -26,8 +31,13 @@ def test_flat_public_api() -> None:
         (BookExportContext, api.BookExportContext),
         (BookExportResult, api.BookExportResult),
         (ComposedChapter, api.ComposedChapter),
+        (ComposedDocument, api.ComposedDocument),
+        (DocumentExportContext, api.DocumentExportContext),
+        (DocumentExportResult, api.DocumentExportResult),
         (export_book, api.export_book),
+        (export_document, api.export_document),
         (resolve_book_export, api.resolve_book_export),
+        (resolve_document_export, api.resolve_document_export),
     )
     assert all(root_symbol is api_symbol for root_symbol, api_symbol in public_pairs)
     assert AudiobookTrack.__name__ == "AudiobookTrack"
@@ -40,8 +50,13 @@ def test_flat_public_api() -> None:
         "BookExportContext",
         "BookExportResult",
         "ComposedChapter",
+        "ComposedDocument",
+        "DocumentExportContext",
+        "DocumentExportResult",
         "export_book",
+        "export_document",
         "resolve_book_export",
+        "resolve_document_export",
     }
     assert public_symbols.issubset(audioexport.__all__)
     assert public_symbols.issubset(api.__all__)

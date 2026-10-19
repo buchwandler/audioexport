@@ -13,6 +13,7 @@ from . import __version__
 from .audiobook import build_audiobook
 from .audiobook_profile import load_audiobook_profile, resolve_profile_overrides
 from .book import export_book
+from .document import export_document
 from .errors import AudioExportError
 from .fftools import doctor, probe
 from .formats import FORMATS
@@ -38,9 +39,7 @@ def _parser() -> argparse.ArgumentParser:
     encode_parser.add_argument("--album")
     encode_parser.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
     encode_parser.add_argument("--cover", type=Path)
-    encode_parser.add_argument(
-        "--timeline", type=Path, help="Generic JSON chapters or Readio timeline"
-    )
+    encode_parser.add_argument("--timeline", type=Path, help="Generic JSON chapter timeline")
     encode_parser.add_argument("--force", action="store_true")
     encode_parser.add_argument("--json", action="store_true")
     encode_parser.add_argument("--ffmpeg")
@@ -119,6 +118,28 @@ def _parser() -> argparse.ArgumentParser:
     export_book_parser.add_argument("--json", action="store_true")
     export_book_parser.add_argument("--ffmpeg")
     export_book_parser.add_argument("--ffprobe")
+    export_document_parser = sub.add_parser(
+        "export-document", help="Export a composed .ssmdoc variant to a final audio format"
+    )
+    export_document_parser.add_argument("document", type=Path)
+    export_document_parser.add_argument("--variant", required=True)
+    export_document_parser.add_argument("-o", "--output", type=Path)
+    export_document_parser.add_argument("--format", choices=tuple(FORMATS))
+    export_document_parser.add_argument("--bitrate")
+    export_document_parser.add_argument("--title")
+    export_document_parser.add_argument("--artist")
+    export_document_parser.add_argument("--album")
+    export_document_parser.add_argument(
+        "--metadata", action="append", default=[], metavar="KEY=VALUE"
+    )
+    export_document_parser.add_argument("--cover", type=Path)
+    export_document_parser.add_argument("--timeline", type=Path)
+    export_document_parser.add_argument("--audiocompose-root", type=Path)
+    export_document_parser.add_argument("--output-root", type=Path)
+    export_document_parser.add_argument("--force", action="store_true")
+    export_document_parser.add_argument("--json", action="store_true")
+    export_document_parser.add_argument("--ffmpeg")
+    export_document_parser.add_argument("--ffprobe")
     inspect = sub.add_parser("inspect", help="Inspect audio and audioexport sidecar")
     inspect.add_argument("input", type=Path)
     inspect.add_argument("--json", action="store_true")
@@ -128,6 +149,29 @@ def _parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--ffmpeg")
     doctor_parser.add_argument("--ffprobe")
     return parser
+
+
+def _metadata_values(
+    items: Sequence[str],
+    *,
+    title: str | None = None,
+    artist: str | None = None,
+    album: str | None = None,
+) -> dict[str, str]:
+    """Combine repeatable KEY=VALUE options and common tag overrides."""
+    metadata: dict[str, str] = {}
+    for item in items:
+        if "=" not in item:
+            raise AudioExportError(
+                "--metadata requires KEY=VALUE", code="audioexport.metadata_invalid"
+            )
+        key, value = item.split("=", 1)
+        metadata[key] = value
+    for field, tag_value in (("title", title), ("artist", artist), ("album", album)):
+        if tag_value is None:
+            continue
+        metadata[field] = tag_value
+    return metadata
 
 
 def _print(payload: Any, *, as_json: bool) -> None:
@@ -148,6 +192,25 @@ def _print_book_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
     print(f"output: {payload['output']}")
     print(f"export identity: {payload['export_identity']}")
     print(f"duration: {payload['duration_seconds']:.3f} s")
+    print(
+        "codec/sample-rate/channels: "
+        f"{payload['codec']}/{payload['sample_rate']} Hz/{payload['channels']}"
+    )
+    print(f"reused: {'yes' if payload['reused'] else 'no'}")
+
+
+def _print_document_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        _print(payload, as_json=True)
+        return
+    print(f"workspace: {payload['workspace']}")
+    print(f"variant: {payload['variant']}")
+    print(f"document: {payload['document_id']}")
+    print(f"input compose report: {payload['input_compose_report']}")
+    print(f"source: {payload['source']}")
+    print(f"output: {payload['output']}")
+    print(f"export identity: {payload['export_identity']}")
+    print(f"duration: {payload['duration_ms'] / 1000:.3f} s")
     print(
         "codec/sample-rate/channels: "
         f"{payload['codec']}/{payload['sample_rate']} Hz/{payload['channels']}"
@@ -178,16 +241,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if fmt is None:
                 parser.error("encode requires --format or --output with an audio extension")
             output = args.output or args.input.with_suffix(FORMATS[fmt].extension)
-            metadata = {}
-            for item in args.metadata:
-                if "=" not in item:
-                    parser.error("--metadata requires KEY=VALUE")
-                key, value = item.split("=", 1)
-                metadata[key] = value
-            for field in ("title", "artist", "album"):
-                value = getattr(args, field)
-                if value is not None:
-                    metadata[field] = value
+            metadata = _metadata_values(
+                args.metadata,
+                title=args.title,
+                artist=args.artist,
+                album=args.album,
+            )
             result = encode(
                 args.input,
                 output,
@@ -293,6 +352,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "reused": book_result.audiobook.reused,
             }
             _print_book_export(payload, as_json=args.json)
+            return 0
+        if args.command == "export-document":
+            document_result = export_document(
+                args.document,
+                variant=args.variant,
+                output=args.output,
+                format=args.format,
+                bitrate=args.bitrate,
+                metadata=_metadata_values(
+                    args.metadata,
+                    title=args.title,
+                    artist=args.artist,
+                    album=args.album,
+                ),
+                cover=args.cover,
+                timeline=args.timeline,
+                audiocompose_root=args.audiocompose_root,
+                output_root=args.output_root,
+                force=args.force,
+                ffmpeg=args.ffmpeg,
+                ffprobe=args.ffprobe,
+            )
+            _print_document_export(document_result.to_dict(), as_json=args.json)
             return 0
         if args.command == "audiobook":
             metadata_values: dict[str, str] = {}

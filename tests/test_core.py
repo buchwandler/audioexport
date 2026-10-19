@@ -51,7 +51,6 @@ def test_timeline_and_chapters(tmp_path: Path) -> None:
     file.write_text(
         json.dumps(
             {
-                "format": "readio.composition-timeline",
                 "sample_rate": 24000,
                 "chapters": [
                     {"scope_id": "a", "title": "Hello", "start_sample": 0},
@@ -101,12 +100,11 @@ def test_source_options_and_no_clobber(wav: Path, have_tools: None) -> None:
         encode(wav, wav, format="wav")
 
 
-def test_m4b_chapters_reado_and_metadata(wav: Path, tmp_path: Path, have_tools: None) -> None:
+def test_m4b_sample_chapters_and_metadata(wav: Path, tmp_path: Path, have_tools: None) -> None:
     timeline = tmp_path / "timeline.json"
     timeline.write_text(
         json.dumps(
             {
-                "format": "readio.composition-timeline",
                 "sample_rate": 24000,
                 "chapters": [
                     {"title": "First", "start_sample": 0},
