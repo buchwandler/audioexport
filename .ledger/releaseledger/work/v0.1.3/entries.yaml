@@ -1,0 +1,57 @@
+schema: releaseledger.entry-batch.v1
+operation: create
+schema_version: 1
+object_type: release_entry_batch
+release_version: v0.1.3
+git_base_ref: 356ce267beae97b3ef72a11ab6c07a212d6982cc
+git_base_sha: 356ce267beae97b3ef72a11ab6c07a212d6982cc
+git_head_ref: 97fc5681e7a1a3c9754d20dd29b05063c760539b
+git_head_sha: 97fc5681e7a1a3c9754d20dd29b05063c760539b
+include_merges: nontrivial
+entries:
+  - kind: added
+    summary: "Added verified .ssmdoc document export with compose-report and WAV validation plus CLI/API support"
+    status: accepted
+    source_refs:
+      - git:e58afca5d042bd9c6d47c2b8f03b718f14d934a6
+    paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/_workspace.py
+      - audioexport/api.py
+      - audioexport/book.py
+      - audioexport/chapters.py
+      - audioexport/cli.py
+      - audioexport/document.py
+      - audioexport/formats.py
+      - docs/index.md
+      - docs/readio-migration.md
+      - tests/test_api_import.py
+      - tests/test_chapter_precision.py
+      - tests/test_cli.py
+      - tests/test_core.py
+      - tests/test_document.py
+    sources:
+      - git:e58afca5d042bd9c6d47c2b8f03b718f14d934a6
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"
+  - kind: added
+    summary: "Added configurable compose and output roots for book export and exposed compose-report provenance"
+    status: accepted
+    source_refs:
+      - git:97fc5681e7a1a3c9754d20dd29b05063c760539b
+    paths:
+      - audioexport/book.py
+      - audioexport/cli.py
+      - docs/changelog.md
+      - docs/index.md
+      - tests/test_book.py
+      - tests/test_cli.py
+    sources:
+      - git:97fc5681e7a1a3c9754d20dd29b05063c760539b
+    prs: []
+    issues: []
+    contributors:
+      - "@holgern"

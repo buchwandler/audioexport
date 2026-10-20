@@ -1,0 +1,57 @@
+{
+  "candidate_count": 2,
+  "candidates": [
+    {
+      "additions": 1600,
+      "deletions": 292,
+      "patch_file": "e58afca.patch",
+      "patch_sha256": "647932cb6ceaf877d2ba0b824abeb6f27070baa220366ed6a8e50259da3d69ec",
+      "paths": [
+        "README.md",
+        "audioexport/__init__.py",
+        "audioexport/_workspace.py",
+        "audioexport/api.py",
+        "audioexport/book.py",
+        "audioexport/chapters.py",
+        "audioexport/cli.py",
+        "audioexport/document.py",
+        "audioexport/formats.py",
+        "docs/index.md",
+        "docs/readio-migration.md",
+        "tests/test_api_import.py",
+        "tests/test_chapter_precision.py",
+        "tests/test_cli.py",
+        "tests/test_core.py",
+        "tests/test_document.py"
+      ],
+      "sha": "e58afca5d042bd9c6d47c2b8f03b718f14d934a6",
+      "short_sha": "e58afca",
+      "source_ref": "git:e58afca5d042bd9c6d47c2b8f03b718f14d934a6"
+    },
+    {
+      "additions": 129,
+      "deletions": 24,
+      "patch_file": "97fc568.patch",
+      "patch_sha256": "c83c3daefca89e913a5f171074450c092f6c0a5343ecbd4b269ebc06b8a3ea28",
+      "paths": [
+        "audioexport/book.py",
+        "audioexport/cli.py",
+        "docs/changelog.md",
+        "docs/index.md",
+        "tests/test_book.py",
+        "tests/test_cli.py"
+      ],
+      "sha": "97fc5681e7a1a3c9754d20dd29b05063c760539b",
+      "short_sha": "97fc568",
+      "source_ref": "git:97fc5681e7a1a3c9754d20dd29b05063c760539b"
+    }
+  ],
+  "git_base_ref": "356ce267beae97b3ef72a11ab6c07a212d6982cc",
+  "git_base_sha": "356ce267beae97b3ef72a11ab6c07a212d6982cc",
+  "git_head_ref": "97fc5681e7a1a3c9754d20dd29b05063c760539b",
+  "git_head_sha": "97fc5681e7a1a3c9754d20dd29b05063c760539b",
+  "include_merges": "nontrivial",
+  "object_type": "git_evidence_manifest",
+  "release_version": "v0.1.3",
+  "schema_version": 1
+}

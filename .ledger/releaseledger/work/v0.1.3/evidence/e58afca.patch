@@ -1,0 +1,2353 @@
+ README.md                       |  58 +++--
+ audioexport/__init__.py         |  14 +-
+ audioexport/_workspace.py       | 215 ++++++++++++++++
+ audioexport/api.py              |  12 +
+ audioexport/book.py             | 182 ++------------
+ audioexport/chapters.py         |   6 +-
+ audioexport/cli.py              | 108 ++++++++-
+ audioexport/document.py         | 475 ++++++++++++++++++++++++++++++++++++
+ audioexport/formats.py          |   4 +-
+ docs/index.md                   |  30 ++-
+ docs/readio-migration.md        |  87 -------
+ tests/test_api_import.py        |  15 ++
+ tests/test_chapter_precision.py |   1 -
+ tests/test_cli.py               | 155 ++++++++++++
+ tests/test_core.py              |   4 +-
+ tests/test_document.py          | 526 ++++++++++++++++++++++++++++++++++++++++
+ 16 files changed, 1600 insertions(+), 292 deletions(-)
+
+diff --git a/README.md b/README.md
+index bbc0f38..ad7350f 100644
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,6 @@
+ # audioexport
+
+-An independent Python library and command-line interface for exporting audio through **FFmpeg**. This is the first extraction step from Readio's output/encoding subsystem, but **audioexport does not import or install Readio, AudioCompose, UtterPlan, or synthesis engines**.
++AudioExport is a standalone Python library and CLI for verified FFmpeg audio export.
+
+ Supported formats: WAV (PCM16), FLAC, MP3, M4A (AAC), M4B (AAC audiobook), OGG (Vorbis), and Opus. Handles tagged metadata, embedded JPEG/PNG cover art for MP3/M4A/M4B, JSON chapter timelines for M4A/M4B, standalone ordered multi-track audiobook assembly, FFprobe verification, artifact identities and safe reuse.
+
+@@ -24,7 +24,7 @@ audioexport doctor --json
+
+ `doctor` reports package/tool versions and encoder availability per format. Its existing `ready` key means FFmpeg and FFprobe are present; `all_formats_ready` and each `formats` entry report encoder capability and a reason when unavailable. The additive `features` entries report `m4b_encode`, `m4b_audiobook`, and `m4b_stream_copy` availability; missing optional capabilities do not make `ready` false. `run_profile()` checks the encoders selected by the profile before writing outputs.
+
+-Base Python dependencies are `langcodes>=3.3` on all supported versions and `tomli>=2` on Python 3.10. FFmpeg/FFprobe are external executables; AudioExport does not install or import Readio, AudioCompose, UtterPlan, VoiceRender, soundfile, or NumPy.
++Base Python dependencies are `langcodes>=3.3` on all supported versions and `tomli>=2` on Python 3.10. FFmpeg/FFprobe are external executables; AudioExport has no runtime dependency on synthesis, planning, or composition packages.
+
+ ## CLI quickstart
+
+@@ -63,7 +63,7 @@ audioexport audiobook book-tracks/ -o book.m4b \
+ audioexport audiobook 01-intro.mp3 02-chapter-one.flac 03-chapter-two.wav \
+   -o book.m4b --bitrate 96k --language eng
+
+-# Explicit chapter starts from chapters.txt or the existing JSON/Readio timeline format.
++# Explicit chapter starts from chapters.txt or a generic JSON timeline.
+ audioexport audiobook book-tracks/ -o book.m4b --chapters-file chapters.txt
+ ```
+
+@@ -114,7 +114,7 @@ mode = "explicit"       # tracks | explicit | none
+ # title_source = "tag"  # tag (falls back to filename) | filename
+ ```
+
+-Run it with `audioexport audiobook --profile audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file` override profile values; the TOML input order remains authoritative. `mode = "tracks"` (the default) creates one chapter per track; `mode = "explicit"` requires `chapters_file`; `mode = "none"` disables chapters. Existing `encode(..., format="m4b", timeline=...)` remains the right choice for Readio's prepared master and project timeline.
++Run it with `audioexport audiobook --profile audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file` override profile values; the TOML input order remains authoritative. `mode = "tracks"` (the default) creates one chapter per track; `mode = "explicit"` requires `chapters_file`; `mode = "none"` disables chapters. Existing `encode(..., format="m4b", timeline=...)` remains the right choice for one prepared source with caller-supplied chapters.
+
+ ## Native `.ssmdbook` pipeline
+
+@@ -125,7 +125,7 @@ audiocompose compose-book . --variant "$VARIANT"
+ audioexport export-book . --variant "$VARIANT"
+ ```
+
+-`export-book` reads `manifest.json` and `audiocompose/<variant>/compose-report.toml`, accepts the producer's singular `[[item]]` tables (and legacy `[[items]]` tables), validates selected entries and WAV checksums/geometry with bare or `sha256:`-prefixed digests, then delegates final M4B assembly and verification to AudioExport. It does not run AudioCompose, repair or synthesize chapters, or use Readio-specific state. Chapter selection accepts `all` (the default), a source number, an inclusive range, or comma-separated source numbers/ranges, for example `--chapters 5,7,11-13`. Selection follows manifest chapter order.
++`export-book` reads `manifest.json` and `audiocompose/<variant>/compose-report.toml`, accepts singular `[[item]]` or plural `[[items]]` report tables, validates selected entries and WAV checksums/geometry with bare or `sha256:`-prefixed digests, then delegates final M4B assembly and verification to AudioExport. It does not run AudioCompose, repair or synthesize chapters. Chapter selection accepts `all` (the default), a source number, an inclusive range, or comma-separated source numbers/ranges, for example `--chapters 5,7,11-13`. Selection follows manifest chapter order.
+
+ For M4A/M4B, language metadata is written on the audio track using ISO 639-2/T. BCP 47 tags such as `en-US` are normalized to their three-letter track code (`eng`).
+
+@@ -133,6 +133,38 @@ By default, output is written to `audioexport/<variant>/<workspace-name-without-
+
+ Metadata precedence is **manifest metadata < audiobook profile metadata < explicit CLI/API metadata**. Audio settings use **AudioExport defaults < audiobook profile < explicit CLI/API flags**. Thus explicit metadata fields replace matching profile/manifest values, profile values replace manifest defaults, and unset values continue to fall through. Explicit cover and audio flags override corresponding profile settings. The profile's inputs and chapter configuration do not replace the variant chapters selected from the compose report.
+
++## Native `.ssmdoc` export
++
++Use `export-document` after AudioCompose has produced a document variant. AudioExport reads only the direct AudioCompose handoff, verifies its report, WAV digest, and geometry, then delegates final encoding to the generic pipeline:
++
++```bash
++audiocompose compose-document story.ssmdoc --variant "$VARIANT"
++audioexport export-document story.ssmdoc \
++  --variant "$VARIANT" \
++  --format mp3 \
++  --title "Story" --artist "An Author"
++```
++
++The input is `audiocompose/<variant>/compose-report.toml` and its verified `document-0001.wav`. By default, output and the adjacent `.audioexport.json` sidecar go to `audioexport/<variant>/<workspace-name>.<format>` (for example, `audioexport/<variant>/story.mp3`). The exact variant and output format are explicit; an output filename extension can supply the format instead. Metadata, cover art, and a generic chapter timeline are caller-supplied; document headings and manifest fields are not inferred as tags or chapters.
++
++Python callers can separate read-only verification from encoding:
++
++```python
++from audioexport import export_document, resolve_document_export
++
++context = resolve_document_export("story.ssmdoc", variant=variant)
++print(context.document.sha256)
++result = export_document(
++    "story.ssmdoc",
++    variant=variant,
++    format="mp3",
++    metadata={"title": "Story", "artist": "An Author"},
++)
++print(result.output, result.export.reused)
++```
++
++AudioExport does not run AudioCompose, synthesize audio, or inspect earlier pipeline stages. It has no runtime dependency on planning, synthesis, or composition packages.
++
+ If `--output` is not set for `encode`, the output filename defaults to the input stem and chosen format. To avoid destroying the input, encoding input and output to the same real path is always rejected.
+
+ Without `--force`, an untracked, symlink, or manually modified output is never overwritten. A previously generated output is updated when its sidecar and checksum still match; re-running identical options returns `reused: true` without re-encoding. `--force` authorizes replacing an unknown or modified regular file, but symlink outputs and sidecars are always rejected. Writes are staged with their manifest; a failed manifest commit restores the last good pair when possible, and an incomplete recovery reports the preserved backup path. A per-target process lock rejects concurrent writers with `audioexport.output_busy`; remove a stale lock only after confirming no writer is active.
+@@ -170,7 +202,7 @@ print(probe("exported/book.m4b")["chapters"])
+
+ You may import the same public functions from `audioexport.api` as well as from `audioexport`.
+
+-The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult`; `build_audiobook()` returns an `AudiobookResult`; `export_book()` and `resolve_book_export()` provide verified composed-book export through `BookExportContext`, `BookExportResult`, and `ComposedChapter`. These symbols, like the other public functions, are available from both `audioexport` and `audioexport.api`.
++The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult`; `build_audiobook()` returns an `AudiobookResult`; `export_book()` and `resolve_book_export()` provide verified composed-book export. `resolve_document_export()` performs read-only SSMDDoc verification, while `export_document()` verifies and encodes through `ComposedDocument`, `DocumentExportContext`, and `DocumentExportResult`. These symbols are available from both `audioexport` and `audioexport.api`.
+
+ ## Export profile
+
+@@ -246,7 +278,7 @@ resolved_outputs = preflight_profile(profile, source)
+
+ for resolved in resolved_outputs:
+     target = Path("exports") / resolved.filename
+-    # A consumer such as Readio performs its target/ownership/overwrite checks here.
++    # Applications should perform their own target and overwrite checks here.
+     result = encode(
+         source,
+         target,
+@@ -258,7 +290,7 @@ for resolved in resolved_outputs:
+     )
+ ```
+
+-A consumer may instead call `resolve_output()` for a single selected spec; use full-profile preflight when the operation requires every configured output validated. Preflight is not an ownership authorization: Readio remains responsible for project locks and freshness, destination selection and collision/ownership checks, overwrite authorization, state/index updates, result types, and partial-batch bookkeeping. Call `encode()` only after those consumer-owned checks pass. `ResolvedOutput`, `resolve_output`, and `preflight_profile` are available from both `audioexport` and `audioexport.api`.
++A consumer may instead call `resolve_output()` for a single selected spec; use full-profile preflight when the operation requires every configured output validated. Preflight is not an ownership authorization: applications remain responsible for their own locks, target selection, overwrite authorization, and state updates. Call `encode()` only after those consumer-owned checks pass. `ResolvedOutput`, `resolve_output`, and `preflight_profile` are available from both `audioexport` and `audioexport.api`.
+
+ ## Chapters/timeline
+
+@@ -275,7 +307,7 @@ Use an independent JSON file such as [`examples/chapters.json`](examples/chapter
+
+ `end_ms` is optional; without it, chapter ends are the next chapter start or the audio duration. Chapter offsets must be strictly increasing and within the audio file. FFmpeg metadata escaping is handled internally. Embedded chapter markers are currently supported for **M4A and M4B**.
+
+-For an incremental Readio migration, the same `--timeline` API also reads **Readio's `readio.composition-timeline` JSON** with `sample_rate` and chapter `start_sample`. FFmetadata is constructed with its original sample timebase for precision, with generic millisecond chapter fields available for non-Readio workflows.
++Exact-sample timelines may include a top-level `sample_rate` and chapter `start_sample` values. FFmetadata preserves their original sample timebase and coordinates using `TIMEBASE=1/<sample_rate>`.
+
+ ## Integrity and versioning
+
+@@ -287,10 +319,6 @@ Version is dynamic through `setuptools-scm`: `pyproject.toml` has no static `ver
+
+ For a release, first commit the code and wait for the complete Linux/Windows/macOS, Python 3.10–3.14 CI matrix, including its Sphinx warning-as-error documentation build. Then create and push the intended version tag (for example `v0.1.2`). Manually dispatch the GitHub Actions workflow named **Release** with that existing tag. It reruns the full supported-Python test matrix, checks the tag against wheel/sdist metadata, inspects package contents, installs the wheel outside the checkout, and checks CLI/API version parity. Publishing uses the configured `PYPI_API_TOKEN` secret after approval in the `pypi` GitHub environment; repository administrators must ensure the token and environment approval rules are configured. Do not publish from an untagged/fallback build.
+
+-## Readio migration
+-
+-**Readio is deliberately not patched by this project.** Its existing export commands continue using their current code until an opt-in bridge is tested. A future integration must call AudioExport's Python library API; it must never launch the `audioexport` CLI as a subprocess. See [`docs/readio-migration.md`](docs/readio-migration.md) for the compatibility boundary, integration order, and rollback rules. Readio continues owning project locks, path defaults, staleness, indexed state, and orchestration.
+-
+ ## Tests
+
+ ```bash
+@@ -306,11 +334,11 @@ python scripts/check_package_artifacts.py
+ audioexport doctor --json
+ ```
+
+-Tests cover seven real formats in one profile, mixed-format audiobook assembly, 100-track ordering/chapters, audiobook cache invalidation, M4A/M4B chapters and covers, Readio sample timelines, malformed probes, encoder availability, transactional failure recovery, no-clobber behavior, and concurrent writers. Normal CI runs Python 3.10–3.14 on Linux, Windows, and macOS, and checks tests, lint, formatting, typing, build metadata, Twine, package contents, and isolated wheel installation. CI also builds the Sphinx documentation on Linux/Python 3.13 with warnings treated as errors. The manually dispatched **Release** workflow retests the full supported Python range before packaging and API-token publishing. Cross-platform encoder availability depends on the FFmpeg build installed by each runner.
++Tests cover seven real formats in one profile, mixed-format audiobook assembly, 100-track ordering/chapters, audiobook cache invalidation, M4A/M4B chapters and covers, exact-sample chapter timelines, malformed probes, encoder availability, transactional failure recovery, no-clobber behavior, and concurrent writers. Normal CI runs Python 3.10–3.14 on Linux, Windows, and macOS, and checks tests, lint, formatting, typing, build metadata, Twine, package contents, and isolated wheel installation. CI also builds the Sphinx documentation on Linux/Python 3.13 with warnings treated as errors. The manually dispatched **Release** workflow retests the full supported Python range before packaging and API-token publishing. Cross-platform encoder availability depends on the FFmpeg build installed by each runner.
+
+ ## Limitations (MVP)
+
+-No audio mastering, TTS, audio mixing, streaming PCM API, FFmpeg filter graphs, network service, or GUI. No automatic conversion of Readio project configs, legacy export cache, or Audiocompose timeline semantics other than chapter starts. Encoder output may vary across FFmpeg versions; the cache key includes tool versions. Chapter verification has a small tolerance for FFmpeg container timebase rounding. Standalone encoding does not modify Readio projects.
++No audio mastering, TTS, audio mixing, streaming PCM API, FFmpeg filter graphs, network service, or GUI. Encoder output may vary across FFmpeg versions; the export identity includes tool versions. Chapter verification tolerates small FFmpeg container timebase rounding.
+
+ ## License
+
+diff --git a/audioexport/__init__.py b/audioexport/__init__.py
+index 5f1a494..b706724 100644
+--- a/audioexport/__init__.py
++++ b/audioexport/__init__.py
+@@ -1,4 +1,4 @@
+-"""Standalone audio export; no import of Readio or AudioCompose."""
++"""Standalone verified audio export and workspace adapters."""
+
+ from __future__ import annotations
+
+@@ -14,6 +14,13 @@ from .book import (
+     resolve_book_export,
+ )
+ from .chapters import Chapter, load_chapters
++from .document import (
++    ComposedDocument,
++    DocumentExportContext,
++    DocumentExportResult,
++    export_document,
++    resolve_document_export,
++)
+ from .errors import (
+     AudioExportError,
+     EncodingError,
+@@ -45,6 +52,9 @@ __all__ = [
+     "BookExportResult",
+     "Chapter",
+     "ComposedChapter",
++    "ComposedDocument",
++    "DocumentExportContext",
++    "DocumentExportResult",
+     "EncodingError",
+     "ExportProfile",
+     "ExportResult",
+@@ -58,6 +68,7 @@ __all__ = [
+     "doctor",
+     "encode",
+     "export_book",
++    "export_document",
+     "load_audiobook_profile",
+     "load_chapters",
+     "load_profile",
+@@ -65,6 +76,7 @@ __all__ = [
+     "preflight_profile",
+     "probe",
+     "resolve_book_export",
++    "resolve_document_export",
+     "resolve_output",
+     "run_profile",
+ ]
+diff --git a/audioexport/_workspace.py b/audioexport/_workspace.py
+new file mode 100644
+index 0000000..ee762a0
+--- /dev/null
++++ b/audioexport/_workspace.py
+@@ -0,0 +1,215 @@
++"""Shared security checks for native workspace adapters."""
++
++from __future__ import annotations
++
++import hashlib
++import math
++import stat
++import unicodedata
++import wave
++from collections.abc import Mapping
++from pathlib import Path, PureWindowsPath
++from typing import Any
++
++from .errors import InvalidExportError, VerificationError
++
++DURATION_TOLERANCE_SECONDS = 0.01
++
++
++def safe_variant(variant: str, *, error_code: str) -> str:
++    """Validate a variant as one portable, safe directory component."""
++    if (
++        not isinstance(variant, str)
++        or not variant
++        or variant in {".", ".."}
++        or "/" in variant
++        or "\\" in variant
++        or ":" in variant
++        or PureWindowsPath(variant).is_absolute()
++        or any(unicodedata.category(character) == "Cc" for character in variant)
++    ):
++        raise InvalidExportError(
++            "variant must be a safe single directory component", code=error_code
++        )
++    return variant
++
++
++def resolve_stage_root(
++    workspace: Path,
++    root: str | Path | None,
++    *,
++    stage_name: str,
++    missing_code: str,
++    invalid_code: str,
++) -> Path:
++    """Resolve an existing stage root, interpreting relative overrides under workspace."""
++    selected = Path(root).expanduser() if root is not None else workspace / stage_name
++    if not selected.is_absolute():
++        selected = workspace / selected
++    try:
++        resolved = selected.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise InvalidExportError(
++            f"{stage_name} directory does not exist: {selected}", code=missing_code
++        ) from exc
++    if selected.is_symlink() or not resolved.is_dir():
++        raise InvalidExportError(
++            f"{stage_name} root must be a non-symlink directory: {selected}",
++            code=invalid_code,
++        )
++    return resolved
++
++
++def path_is_within(root: Path, path: Path) -> bool:
++    """Return whether an absolute path is contained by an absolute directory."""
++    try:
++        path.relative_to(root)
++    except ValueError:
++        return False
++    return True
++
++
++def safe_report_file(
++    variant_dir: Path,
++    reported: Any,
++    *,
++    error_code: str,
++) -> Path:
++    """Resolve a regular report-declared file without traversal or symlink hops."""
++    if not isinstance(reported, str) or not reported or "\x00" in reported or "\\" in reported:
++        raise VerificationError(
++            "compose report output must be a relative POSIX path", code=error_code
++        )
++    relative = Path(reported)
++    windows = PureWindowsPath(reported)
++    if relative.is_absolute() or windows.is_absolute() or windows.drive:
++        raise VerificationError(
++            "compose report output must be relative to its variant directory",
++            code=error_code,
++        )
++    if any(part in {"", ".", ".."} for part in reported.split("/")):
++        raise VerificationError(
++            "compose report output must not contain traversal components",
++            code=error_code,
++        )
++    candidate = variant_dir / relative
++    current = variant_dir
++    try:
++        for part in relative.parts:
++            current = current / part
++            if current.is_symlink():
++                raise VerificationError(
++                    "compose report output must not traverse symlinks", code=error_code
++                )
++        resolved = candidate.resolve(strict=True)
++    except VerificationError:
++        raise
++    except (OSError, RuntimeError) as exc:
++        raise VerificationError(
++            f"compose report output does not resolve to a regular file: {reported}",
++            code=error_code,
++        ) from exc
++    if not path_is_within(variant_dir, resolved):
++        raise VerificationError(
++            "compose report output escapes its variant directory", code=error_code
++        )
++    try:
++        mode = resolved.lstat().st_mode
++    except OSError as exc:
++        raise VerificationError(
++            f"compose report output is unavailable: {reported}", code=error_code
++        ) from exc
++    if not stat.S_ISREG(mode):
++        raise VerificationError(
++            f"compose report output must be a regular non-symlink file: {reported}",
++            code=error_code,
++        )
++    return resolved
++
++
++def sha256_file(path: Path, *, error_code: str) -> str:
++    digest = hashlib.sha256()
++    try:
++        with path.open("rb") as stream:
++            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
++                digest.update(chunk)
++    except OSError as exc:
++        raise VerificationError(f"cannot hash composed WAV {path}", code=error_code) from exc
++    return digest.hexdigest()
++
++
++def _positive_int(value: Any, field: str, *, error_code: str) -> int:
++    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
++        raise InvalidExportError(f"{field} must be a positive integer", code=error_code)
++    return value
++
++
++def verify_reported_wav(
++    path: Path,
++    report: Mapping[str, Any],
++    *,
++    report_code: str,
++    geometry_code: str,
++    item_label: str = "compose item",
++) -> tuple[int, int, int, float]:
++    """Verify a WAV header against report geometry using the established tolerance."""
++    expected_rate = _positive_int(
++        report.get("sample_rate"), f"{item_label} sample_rate", error_code=report_code
++    )
++    expected_channels = _positive_int(
++        report.get("channels"), f"{item_label} channels", error_code=report_code
++    )
++    expected_frames = _positive_int(
++        report.get("frames"), f"{item_label} frames", error_code=report_code
++    )
++    duration = report.get("duration_seconds")
++    if (
++        isinstance(duration, bool)
++        or not isinstance(duration, (int, float))
++        or not math.isfinite(float(duration))
++        or duration <= 0
++    ):
++        raise InvalidExportError(
++            f"{item_label} duration_seconds must be a positive finite number",
++            code=report_code,
++        )
++    complete_audio = True
++    try:
++        with wave.open(str(path), "rb") as source:
++            actual_rate = source.getframerate()
++            actual_channels = source.getnchannels()
++            actual_frames = source.getnframes()
++            sample_width = source.getsampwidth()
++            frame_size = actual_channels * sample_width
++            if frame_size <= 0:
++                complete_audio = False
++            else:
++                remaining_frames = actual_frames
++                while remaining_frames > 0:
++                    chunk = source.readframes(min(remaining_frames, 65536))
++                    if not chunk or len(chunk) % frame_size:
++                        complete_audio = False
++                        break
++                    frames_read = len(chunk) // frame_size
++                    if frames_read <= 0:
++                        complete_audio = False
++                        break
++                    remaining_frames -= frames_read
++                if remaining_frames:
++                    complete_audio = False
++    except (OSError, EOFError, wave.Error) as exc:
++        raise VerificationError(
++            f"composed artifact is not a readable WAV file: {path}", code=geometry_code
++        ) from exc
++    actual_duration = actual_frames / actual_rate if actual_rate > 0 else 0.0
++    if (
++        not complete_audio
++        or actual_rate != expected_rate
++        or actual_channels != expected_channels
++        or actual_frames != expected_frames
++        or abs(actual_duration - float(duration)) > DURATION_TOLERANCE_SECONDS
++    ):
++        raise VerificationError(
++            f"composed WAV geometry does not match the report: {path}", code=geometry_code
++        )
++    return actual_rate, actual_channels, actual_frames, actual_duration
+diff --git a/audioexport/api.py b/audioexport/api.py
+index f6cb31e..73a2532 100644
+--- a/audioexport/api.py
++++ b/audioexport/api.py
+@@ -12,6 +12,13 @@ from .book import (
+     resolve_book_export,
+ )
+ from .chapters import Chapter, load_chapters
++from .document import (
++    ComposedDocument,
++    DocumentExportContext,
++    DocumentExportResult,
++    export_document,
++    resolve_document_export,
++)
+ from .errors import (
+     AudioExportError,
+     EncodingError,
+@@ -38,6 +45,9 @@ __all__ = [
+     "BookExportResult",
+     "Chapter",
+     "ComposedChapter",
++    "ComposedDocument",
++    "DocumentExportContext",
++    "DocumentExportResult",
+     "EncodingError",
+     "ExportProfile",
+     "ExportResult",
+@@ -50,6 +60,7 @@ __all__ = [
+     "doctor",
+     "encode",
+     "export_book",
++    "export_document",
+     "load_audiobook_profile",
+     "load_chapters",
+     "load_profile",
+@@ -57,6 +68,7 @@ __all__ = [
+     "preflight_profile",
+     "probe",
+     "resolve_book_export",
++    "resolve_document_export",
+     "resolve_output",
+     "run_profile",
+ ]
+diff --git a/audioexport/book.py b/audioexport/book.py
+index ffacb03..3822e3d 100644
+--- a/audioexport/book.py
++++ b/audioexport/book.py
+@@ -6,17 +6,12 @@ validates selected WAV files and then delegates assembly to ``build_audiobook``.
+
+ from __future__ import annotations
+
+-import hashlib
+ import json
+-import math
+-import os
+ import re
+-import stat
+ import sys
+-import wave
+ from collections.abc import Mapping
+ from dataclasses import dataclass
+-from pathlib import Path, PureWindowsPath
++from pathlib import Path
+ from typing import Any
+
+ if sys.version_info >= (3, 11):
+@@ -24,12 +19,12 @@ if sys.version_info >= (3, 11):
+ else:  # pragma: no cover - Python 3.10
+     import tomli as tomllib
+
++from . import _workspace
+ from .audiobook import AudiobookResult, AudiobookTrack, build_audiobook
+ from .audiobook_profile import AudiobookProfile, load_audiobook_profile
+ from .errors import InvalidExportError, VerificationError
+ from .metadata import AudiobookMetadata, audiobook_tags
+
+-_DURATION_TOLERANCE_SECONDS = 0.01
+ _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+@@ -192,24 +187,7 @@ def _validate_metadata(payload: Mapping[str, Any]) -> None:
+
+
+ def _safe_variant(variant: str) -> str:
+-    if not isinstance(variant, str) or not variant or variant in {".", ".."}:
+-        raise _fail(
+-            "variant must be a safe single directory component",
+-            code="audioexport.book_variant_invalid",
+-        )
+-    if (
+-        "/" in variant
+-        or "\\" in variant
+-        or "\x00" in variant
+-        or ":" in variant
+-        or PureWindowsPath(variant).is_absolute()
+-        or any(ord(character) < 32 for character in variant)
+-    ):
+-        raise _fail(
+-            "variant must be a safe single directory component",
+-            code="audioexport.book_variant_invalid",
+-        )
+-    return variant
++    return _workspace.safe_variant(variant, error_code="audioexport.book_variant_invalid")
+
+
+ def _workspace_for(book: str | Path) -> Path:
+@@ -247,150 +225,32 @@ def _workspace_for(book: str | Path) -> Path:
+
+
+ def _report_root(workspace: Path, audiocompose_root: str | Path | None) -> Path:
+-    root = (
+-        Path(audiocompose_root).expanduser()
+-        if audiocompose_root is not None
+-        else workspace / "audiocompose"
++    return _workspace.resolve_stage_root(
++        workspace,
++        audiocompose_root,
++        stage_name="audiocompose",
++        missing_code="audioexport.book_compose_report_missing",
++        invalid_code="audioexport.book_compose_report_invalid",
+     )
+-    if not root.is_absolute():
+-        root = workspace / root
+-    try:
+-        resolved = root.resolve(strict=True)
+-    except (OSError, RuntimeError) as exc:
+-        raise _fail(
+-            f"AudioCompose directory does not exist: {root}",
+-            code="audioexport.book_compose_report_missing",
+-        ) from exc
+-    if not resolved.is_dir() or root.is_symlink():
+-        raise _fail(
+-            f"AudioCompose root must be a non-symlink directory: {root}",
+-            code="audioexport.book_compose_report_invalid",
+-        )
+-    return resolved
+
+
+ def _safe_report_file(variant_dir: Path, reported: Any) -> Path:
+-    if not isinstance(reported, str) or not reported or "\x00" in reported or "\\" in reported:
+-        raise VerificationError(
+-            "compose report output must be a relative POSIX path",
+-            code="audioexport.book_compose_output_invalid",
+-        )
+-    relative = Path(reported)
+-    windows = PureWindowsPath(reported)
+-    if relative.is_absolute() or windows.is_absolute() or windows.drive:
+-        raise VerificationError(
+-            "compose report output must be relative to its variant directory",
+-            code="audioexport.book_compose_output_invalid",
+-        )
+-    if any(part in {"", ".", ".."} for part in reported.split("/")):
+-        raise VerificationError(
+-            "compose report output must not contain traversal components",
+-            code="audioexport.book_compose_output_invalid",
+-        )
+-    candidate = variant_dir / relative
+-    current = variant_dir
+-    try:
+-        for part in relative.parts:
+-            current = current / part
+-            if current.is_symlink():
+-                raise VerificationError(
+-                    "compose report output must not traverse symlinks",
+-                    code="audioexport.book_compose_output_invalid",
+-                )
+-        resolved = candidate.resolve(strict=True)
+-    except VerificationError:
+-        raise
+-    except (OSError, RuntimeError) as exc:
+-        raise VerificationError(
+-            f"compose report output does not resolve to a regular file: {reported}",
+-            code="audioexport.book_compose_output_invalid",
+-        ) from exc
+-    try:
+-        if os.path.commonpath((str(variant_dir), str(resolved))) != str(variant_dir):
+-            raise VerificationError(
+-                "compose report output escapes its variant directory",
+-                code="audioexport.book_compose_output_invalid",
+-            )
+-    except ValueError as exc:
+-        raise VerificationError(
+-            "compose report output is outside its variant directory",
+-            code="audioexport.book_compose_output_invalid",
+-        ) from exc
+-    try:
+-        mode = resolved.lstat().st_mode
+-    except OSError as exc:
+-        raise VerificationError(
+-            f"compose report output is unavailable: {reported}",
+-            code="audioexport.book_compose_output_invalid",
+-        ) from exc
+-    if not stat.S_ISREG(mode):
+-        raise VerificationError(
+-            f"compose report output must be a regular non-symlink file: {reported}",
+-            code="audioexport.book_compose_output_invalid",
+-        )
+-    return resolved
++    return _workspace.safe_report_file(
++        variant_dir, reported, error_code="audioexport.book_compose_output_invalid"
++    )
+
+
+ def _sha256(path: Path) -> str:
+-    digest = hashlib.sha256()
+-    try:
+-        with path.open("rb") as stream:
+-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+-                digest.update(chunk)
+-    except OSError as exc:
+-        raise VerificationError(
+-            f"cannot hash composed WAV {path}", code="audioexport.book_compose_hash_mismatch"
+-        ) from exc
+-    return digest.hexdigest()
++    return _workspace.sha256_file(path, error_code="audioexport.book_compose_hash_mismatch")
+
+
+ def _verify_wav(path: Path, item: Mapping[str, Any]) -> tuple[int, int, int, float]:
+-    expected_rate = _positive_int(
+-        item.get("sample_rate"),
+-        "compose item sample_rate",
+-        code="audioexport.book_compose_report_invalid",
+-    )
+-    expected_channels = _positive_int(
+-        item.get("channels"),
+-        "compose item channels",
+-        code="audioexport.book_compose_report_invalid",
+-    )
+-    expected_frames = _positive_int(
+-        item.get("frames"), "compose item frames", code="audioexport.book_compose_report_invalid"
++    return _workspace.verify_reported_wav(
++        path,
++        item,
++        report_code="audioexport.book_compose_report_invalid",
++        geometry_code="audioexport.book_compose_geometry_mismatch",
+     )
+-    duration = item.get("duration_seconds")
+-    if (
+-        isinstance(duration, bool)
+-        or not isinstance(duration, (int, float))
+-        or not math.isfinite(float(duration))
+-        or duration <= 0
+-    ):
+-        raise _fail(
+-            "compose item duration_seconds must be a positive finite number",
+-            code="audioexport.book_compose_report_invalid",
+-        )
+-    try:
+-        with wave.open(str(path), "rb") as source:
+-            actual_rate = source.getframerate()
+-            actual_channels = source.getnchannels()
+-            actual_frames = source.getnframes()
+-    except (OSError, EOFError, wave.Error) as exc:
+-        raise VerificationError(
+-            f"composed artifact is not a readable WAV file: {path}",
+-            code="audioexport.book_compose_geometry_mismatch",
+-        ) from exc
+-    actual_duration = actual_frames / actual_rate if actual_rate > 0 else 0.0
+-    if (
+-        actual_rate != expected_rate
+-        or actual_channels != expected_channels
+-        or actual_frames != expected_frames
+-        or abs(actual_duration - float(duration)) > _DURATION_TOLERANCE_SECONDS
+-    ):
+-        raise VerificationError(
+-            f"composed WAV geometry does not match the report: {path}",
+-            code="audioexport.book_compose_geometry_mismatch",
+-        )
+-    return actual_rate, actual_channels, actual_frames, actual_duration
+
+
+ def _read_compose_report(path: Path, requested_variant: str) -> tuple[Mapping[str, Any], ...]:
+@@ -552,9 +412,9 @@ def resolve_book_export(
+             f"unknown AudioCompose variant: {safe_variant}",
+             code="audioexport.book_compose_report_missing",
+         ) from exc
+-    if not resolved_variant.is_dir() or os.path.commonpath(
+-        (str(compose_root), str(resolved_variant))
+-    ) != str(compose_root):
++    if not resolved_variant.is_dir() or not _workspace.path_is_within(
++        compose_root, resolved_variant
++    ):
+         raise _fail(
+             "compose variant directory escapes the AudioCompose root",
+             code="audioexport.book_compose_report_invalid",
+diff --git a/audioexport/chapters.py b/audioexport/chapters.py
+index 392b798..f78c200 100644
+--- a/audioexport/chapters.py
++++ b/audioexport/chapters.py
+@@ -1,4 +1,4 @@
+-"""Portable chapter input plus optional Readio composition-timeline adapter."""
++"""Portable chapter input with millisecond and exact-sample coordinates."""
+
+ from __future__ import annotations
+
+@@ -24,7 +24,7 @@ class Chapter:
+
+
+ def escape_ffmetadata_value(value: str) -> str:
+-    """Ported from Readio: escape FFmetadata delimiters and newlines."""
++    """Escape delimiters and newlines for FFmetadata values."""
+     value = value.replace("\\", "\\\\").replace("=", "\\=")
+     value = value.replace(";", "\\;").replace("#", "\\#")
+     return value.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+@@ -42,7 +42,7 @@ def _milliseconds(value: Any, field: str) -> int:
+
+
+ def load_chapters(timeline: Path | str) -> tuple[Chapter, ...]:
+-    """Read JSON {chapters: [{title,start_ms,end_ms?}]} or Readio start_sample timeline."""
++    """Read JSON chapters with start_ms, or sample_rate and start_sample."""
+     path = Path(timeline)
+     try:
+         data = json.loads(path.read_text(encoding="utf-8"))
+diff --git a/audioexport/cli.py b/audioexport/cli.py
+index 8c15a9a..964140f 100644
+--- a/audioexport/cli.py
++++ b/audioexport/cli.py
+@@ -13,6 +13,7 @@ from . import __version__
+ from .audiobook import build_audiobook
+ from .audiobook_profile import load_audiobook_profile, resolve_profile_overrides
+ from .book import export_book
++from .document import export_document
+ from .errors import AudioExportError
+ from .fftools import doctor, probe
+ from .formats import FORMATS
+@@ -38,9 +39,7 @@ def _parser() -> argparse.ArgumentParser:
+     encode_parser.add_argument("--album")
+     encode_parser.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
+     encode_parser.add_argument("--cover", type=Path)
+-    encode_parser.add_argument(
+-        "--timeline", type=Path, help="Generic JSON chapters or Readio timeline"
+-    )
++    encode_parser.add_argument("--timeline", type=Path, help="Generic JSON chapter timeline")
+     encode_parser.add_argument("--force", action="store_true")
+     encode_parser.add_argument("--json", action="store_true")
+     encode_parser.add_argument("--ffmpeg")
+@@ -119,6 +118,28 @@ def _parser() -> argparse.ArgumentParser:
+     export_book_parser.add_argument("--json", action="store_true")
+     export_book_parser.add_argument("--ffmpeg")
+     export_book_parser.add_argument("--ffprobe")
++    export_document_parser = sub.add_parser(
++        "export-document", help="Export a composed .ssmdoc variant to a final audio format"
++    )
++    export_document_parser.add_argument("document", type=Path)
++    export_document_parser.add_argument("--variant", required=True)
++    export_document_parser.add_argument("-o", "--output", type=Path)
++    export_document_parser.add_argument("--format", choices=tuple(FORMATS))
++    export_document_parser.add_argument("--bitrate")
++    export_document_parser.add_argument("--title")
++    export_document_parser.add_argument("--artist")
++    export_document_parser.add_argument("--album")
++    export_document_parser.add_argument(
++        "--metadata", action="append", default=[], metavar="KEY=VALUE"
++    )
++    export_document_parser.add_argument("--cover", type=Path)
++    export_document_parser.add_argument("--timeline", type=Path)
++    export_document_parser.add_argument("--audiocompose-root", type=Path)
++    export_document_parser.add_argument("--output-root", type=Path)
++    export_document_parser.add_argument("--force", action="store_true")
++    export_document_parser.add_argument("--json", action="store_true")
++    export_document_parser.add_argument("--ffmpeg")
++    export_document_parser.add_argument("--ffprobe")
+     inspect = sub.add_parser("inspect", help="Inspect audio and audioexport sidecar")
+     inspect.add_argument("input", type=Path)
+     inspect.add_argument("--json", action="store_true")
+@@ -130,6 +151,29 @@ def _parser() -> argparse.ArgumentParser:
+     return parser
+
+
++def _metadata_values(
++    items: Sequence[str],
++    *,
++    title: str | None = None,
++    artist: str | None = None,
++    album: str | None = None,
++) -> dict[str, str]:
++    """Combine repeatable KEY=VALUE options and common tag overrides."""
++    metadata: dict[str, str] = {}
++    for item in items:
++        if "=" not in item:
++            raise AudioExportError(
++                "--metadata requires KEY=VALUE", code="audioexport.metadata_invalid"
++            )
++        key, value = item.split("=", 1)
++        metadata[key] = value
++    for field, tag_value in (("title", title), ("artist", artist), ("album", album)):
++        if tag_value is None:
++            continue
++        metadata[field] = tag_value
++    return metadata
++
++
+ def _print(payload: Any, *, as_json: bool) -> None:
+     if as_json:
+         print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
+@@ -155,6 +199,25 @@ def _print_book_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
+     print(f"reused: {'yes' if payload['reused'] else 'no'}")
+
+
++def _print_document_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
++    if as_json:
++        _print(payload, as_json=True)
++        return
++    print(f"workspace: {payload['workspace']}")
++    print(f"variant: {payload['variant']}")
++    print(f"document: {payload['document_id']}")
++    print(f"input compose report: {payload['input_compose_report']}")
++    print(f"source: {payload['source']}")
++    print(f"output: {payload['output']}")
++    print(f"export identity: {payload['export_identity']}")
++    print(f"duration: {payload['duration_ms'] / 1000:.3f} s")
++    print(
++        "codec/sample-rate/channels: "
++        f"{payload['codec']}/{payload['sample_rate']} Hz/{payload['channels']}"
++    )
++    print(f"reused: {'yes' if payload['reused'] else 'no'}")
++
++
+ def main(argv: Sequence[str] | None = None) -> int:
+     parser = _parser()
+     args = parser.parse_args(argv)
+@@ -178,16 +241,12 @@ def main(argv: Sequence[str] | None = None) -> int:
+             if fmt is None:
+                 parser.error("encode requires --format or --output with an audio extension")
+             output = args.output or args.input.with_suffix(FORMATS[fmt].extension)
+-            metadata = {}
+-            for item in args.metadata:
+-                if "=" not in item:
+-                    parser.error("--metadata requires KEY=VALUE")
+-                key, value = item.split("=", 1)
+-                metadata[key] = value
+-            for field in ("title", "artist", "album"):
+-                value = getattr(args, field)
+-                if value is not None:
+-                    metadata[field] = value
++            metadata = _metadata_values(
++                args.metadata,
++                title=args.title,
++                artist=args.artist,
++                album=args.album,
++            )
+             result = encode(
+                 args.input,
+                 output,
+@@ -294,6 +353,29 @@ def main(argv: Sequence[str] | None = None) -> int:
+             }
+             _print_book_export(payload, as_json=args.json)
+             return 0
++        if args.command == "export-document":
++            document_result = export_document(
++                args.document,
++                variant=args.variant,
++                output=args.output,
++                format=args.format,
++                bitrate=args.bitrate,
++                metadata=_metadata_values(
++                    args.metadata,
++                    title=args.title,
++                    artist=args.artist,
++                    album=args.album,
++                ),
++                cover=args.cover,
++                timeline=args.timeline,
++                audiocompose_root=args.audiocompose_root,
++                output_root=args.output_root,
++                force=args.force,
++                ffmpeg=args.ffmpeg,
++                ffprobe=args.ffprobe,
++            )
++            _print_document_export(document_result.to_dict(), as_json=args.json)
++            return 0
+         if args.command == "audiobook":
+             metadata_values: dict[str, str] = {}
+             for item in args.metadata:
+diff --git a/audioexport/document.py b/audioexport/document.py
+new file mode 100644
+index 0000000..31b4023
+--- /dev/null
++++ b/audioexport/document.py
+@@ -0,0 +1,475 @@
++"""Secure adapter from a composed ``.ssmdoc`` workspace to audio export."""
++
++from __future__ import annotations
++
++import json
++import re
++import stat
++import sys
++from collections.abc import Mapping
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any
++
++if sys.version_info >= (3, 11):
++    import tomllib
++else:  # pragma: no cover - Python 3.10
++    import tomli as tomllib
++
++from ._workspace import (
++    path_is_within,
++    resolve_stage_root,
++    safe_report_file,
++    safe_variant,
++    sha256_file,
++    verify_reported_wav,
++)
++from .errors import InvalidExportError, VerificationError
++from .formats import FORMATS, normalize_format
++from .pipeline import ExportResult, encode
++
++_DOCUMENT_ID = "document-0001"
++_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
++_REQUIRED_PROVENANCE = (
++    "render_profile_id",
++    "source_plan_id",
++    "render_plan_id",
++    "render_manifest_id",
++    "output_policy_id",
++    "audiojob_id",
++    "render_manifest_sha256",
++    "render_diagnostics_sha256",
++    "pause_policy_id",
++    "pause_policy_provenance",
++    "audiocompose_version",
++)
++
++
++@dataclass(frozen=True, slots=True)
++class ComposedDocument:
++    """A verified document WAV produced by AudioCompose."""
++
++    id: str
++    path: Path
++    sha256: str
++    sample_rate: int
++    channels: int
++    frames: int
++    duration_seconds: float
++    render_profile_id: str
++    source_plan_id: str
++    render_plan_id: str
++    render_manifest_id: str
++    output_policy_id: str
++    audiojob_id: str
++
++
++@dataclass(frozen=True, slots=True)
++class DocumentExportContext:
++    """Resolved, verified inputs and output location for one document variant."""
++
++    workspace: Path
++    variant: str
++    manifest_path: Path
++    compose_report_path: Path
++    document: ComposedDocument
++    output_root: Path
++    default_stem: str
++
++
++@dataclass(frozen=True, slots=True)
++class DocumentExportResult:
++    """Final encoded output and its verified AudioCompose source context."""
++
++    workspace: Path
++    variant: str
++    document_id: str
++    input_compose_report: Path
++    source: Path
++    output: Path
++    sidecar: Path
++    export: ExportResult
++    document: ComposedDocument
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "workspace": str(self.workspace),
++            "variant": self.variant,
++            "document_id": self.document_id,
++            "input_compose_report": str(self.input_compose_report),
++            "source": str(self.source),
++            "output": str(self.output),
++            "sidecar": str(self.sidecar),
++            "export_identity": self.export.export_id,
++            "output_sha256": self.export.output_sha256,
++            "format": self.export.format,
++            "codec": self.export.codec,
++            "duration_ms": round(self.document.duration_seconds * 1000),
++            "sample_rate": self.document.sample_rate,
++            "channels": self.document.channels,
++            "reused": self.export.reused,
++            "render_profile_id": self.document.render_profile_id,
++            "source_plan_id": self.document.source_plan_id,
++            "render_plan_id": self.document.render_plan_id,
++            "render_manifest_id": self.document.render_manifest_id,
++        }
++
++
++def _fail(message: str, *, code: str) -> InvalidExportError:
++    return InvalidExportError(message, code=code)
++
++
++def _duplicate_checked_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
++    result: dict[str, Any] = {}
++    for key, value in pairs:
++        if key in result:
++            raise ValueError(f"duplicate JSON key {key!r}")
++        result[key] = value
++    return result
++
++
++def _workspace_for_document(document: str | Path) -> Path:
++    if not isinstance(document, (str, Path)):
++        raise _fail("document must be a path", code="audioexport.document_workspace_invalid")
++    candidate = Path(document).expanduser()
++    if candidate.is_symlink():
++        raise _fail(
++            f"document workspace/source must not be a symlink: {candidate}",
++            code="audioexport.document_workspace_invalid",
++        )
++    try:
++        resolved = candidate.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise _fail(
++            f"document path does not exist or cannot be resolved: {candidate}",
++            code="audioexport.document_workspace_invalid",
++        ) from exc
++    if not candidate.is_symlink() and resolved.is_dir():
++        workspace = resolved
++    elif candidate.name == "document.ssmd.md" and resolved.is_file():
++        workspace = resolved.parent
++    else:
++        raise _fail(
++            "document must be an SSMDDoc workspace or its canonical document.ssmd.md file",
++            code="audioexport.document_workspace_invalid",
++        )
++    if candidate.is_dir() and candidate.is_symlink():
++        raise _fail(
++            f"document workspace must not be a symlink: {candidate}",
++            code="audioexport.document_workspace_invalid",
++        )
++    return workspace
++
++
++def _read_manifest(path: Path) -> Mapping[str, Any]:
++    if path.is_symlink() or not path.is_file():
++        raise _fail(
++            f"manifest.json must be a regular non-symlink file: {path}",
++            code="audioexport.document_manifest_invalid",
++        )
++    try:
++        payload = json.loads(
++            path.read_text(encoding="utf-8"), object_pairs_hook=_duplicate_checked_object
++        )
++    except (OSError, UnicodeDecodeError, ValueError) as exc:
++        raise _fail(
++            f"cannot read document manifest: {exc}", code="audioexport.document_manifest_invalid"
++        ) from exc
++    if not isinstance(payload, Mapping):
++        raise _fail(
++            "document manifest must be a JSON object",
++            code="audioexport.document_manifest_invalid",
++        )
++    if (
++        payload.get("format") != "ssmdconvert.document"
++        or isinstance(payload.get("schema_version"), bool)
++        or payload.get("schema_version") != 1
++    ):
++        raise _fail(
++            "document manifest format or schema_version is invalid",
++            code="audioexport.document_manifest_invalid",
++        )
++    document = payload.get("document")
++    if not isinstance(document, Mapping):
++        raise _fail(
++            "document manifest must contain a document object",
++            code="audioexport.document_manifest_invalid",
++        )
++    if document.get("id") != _DOCUMENT_ID:
++        raise _fail(
++            f"document manifest id must be {_DOCUMENT_ID!r}",
++            code="audioexport.document_manifest_invalid",
++        )
++    if document.get("path") != "document.ssmd.md":
++        raise _fail(
++            "document manifest path must be the canonical 'document.ssmd.md'",
++            code="audioexport.document_manifest_invalid",
++        )
++    source = path.parent / "document.ssmd.md"
++    if source.is_symlink() or not source.is_file():
++        raise _fail(
++            f"canonical document source must be a regular non-symlink file: {source}",
++            code="audioexport.document_manifest_invalid",
++        )
++    try:
++        resolved_source = source.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise _fail(
++            f"canonical document source cannot be resolved: {source}",
++            code="audioexport.document_manifest_invalid",
++        ) from exc
++    if not path_is_within(path.parent.resolve(), resolved_source):
++        raise _fail(
++            "canonical document source escapes its workspace",
++            code="audioexport.document_manifest_invalid",
++        )
++    try:
++        if not stat.S_ISREG(source.lstat().st_mode):
++            raise OSError("not a regular file")
++    except OSError as exc:
++        raise _fail(
++            f"canonical document source must be a regular file: {source}",
++            code="audioexport.document_manifest_invalid",
++        ) from exc
++    return payload
++
++
++def _nonempty_string(value: Any, field: str) -> str:
++    if not isinstance(value, str) or not value.strip() or "\x00" in value:
++        raise _fail(
++            f"compose report {field} must be a non-empty string",
++            code="audioexport.document_compose_report_invalid",
++        )
++    return value.strip()
++
++
++def _variant_directory(compose_root: Path, variant: str) -> Path:
++    variant_dir = compose_root / variant
++    if variant_dir.is_symlink():
++        raise _fail(
++            "AudioCompose variant directory must not be a symlink",
++            code="audioexport.document_compose_report_invalid",
++        )
++    try:
++        resolved = variant_dir.resolve(strict=True)
++    except (OSError, RuntimeError) as exc:
++        raise _fail(
++            f"unknown AudioCompose variant: {variant}",
++            code="audioexport.document_compose_report_missing",
++        ) from exc
++    if not resolved.is_dir() or not path_is_within(compose_root, resolved):
++        raise _fail(
++            "AudioCompose variant directory escapes its stage root or is not a directory",
++            code="audioexport.document_compose_report_invalid",
++        )
++    return resolved
++
++
++def _read_compose_report(path: Path, variant: str) -> Mapping[str, Any]:
++    if path.is_symlink():
++        raise _fail(
++            f"compose report must not be a symlink: {path}",
++            code="audioexport.document_compose_report_invalid",
++        )
++    if not path.is_file():
++        raise _fail(
++            f"AudioCompose document report does not exist: {path}",
++            code="audioexport.document_compose_report_missing",
++        )
++    try:
++        with path.open("rb") as stream:
++            payload = tomllib.load(stream)
++    except (OSError, tomllib.TOMLDecodeError) as exc:
++        raise _fail(
++            f"cannot parse AudioCompose document report: {exc}",
++            code="audioexport.document_compose_report_invalid",
++        ) from exc
++    if (
++        not isinstance(payload, Mapping)
++        or payload.get("format") != "audiocompose-document-report"
++        or isinstance(payload.get("version"), bool)
++        or payload.get("version") != 1
++        or payload.get("document_id") != _DOCUMENT_ID
++        or payload.get("variant") != variant
++    ):
++        raise _fail(
++            "compose report format, version, document_id, or variant is invalid",
++            code="audioexport.document_compose_report_invalid",
++        )
++    if payload.get("status") not in {"written", "reused"}:
++        raise _fail(
++            f"document compose status is unusable: {payload.get('status')!r}",
++            code="audioexport.document_compose_item_unusable",
++        )
++    for field in _REQUIRED_PROVENANCE:
++        _nonempty_string(payload.get(field), field)
++    schema_version = payload.get("audiojob_schema_version")
++    if isinstance(schema_version, bool) or schema_version != 2:
++        raise _fail(
++            "compose report audiojob_schema_version must be 2",
++            code="audioexport.document_compose_report_invalid",
++        )
++    return payload
++
++
++def _reported_sha256(value: Any) -> str:
++    if not isinstance(value, str):
++        raise _fail(
++            "compose report sha256 must be a 64-character digest",
++            code="audioexport.document_compose_report_invalid",
++        )
++    digest = value.removeprefix("sha256:")
++    if _SHA256_RE.fullmatch(digest) is None:
++        raise _fail(
++            "compose report sha256 must be a 64-character hexadecimal digest",
++            code="audioexport.document_compose_report_invalid",
++        )
++    return digest
++
++
++def _verified_document(variant_dir: Path, report: Mapping[str, Any]) -> ComposedDocument:
++    source = safe_report_file(
++        variant_dir,
++        report.get("output"),
++        error_code="audioexport.document_compose_output_invalid",
++    )
++    if source.name != f"{_DOCUMENT_ID}.wav":
++        raise VerificationError(
++            f"compose report output must resolve to {_DOCUMENT_ID}.wav",
++            code="audioexport.document_compose_output_invalid",
++        )
++    actual_sha256 = sha256_file(source, error_code="audioexport.document_compose_hash_mismatch")
++    expected_sha256 = _reported_sha256(report.get("sha256"))
++    if actual_sha256.casefold() != expected_sha256.casefold():
++        raise VerificationError(
++            f"composed document checksum does not match the report: {source}",
++            code="audioexport.document_compose_hash_mismatch",
++        )
++    rate, channels, frames, duration = verify_reported_wav(
++        source,
++        report,
++        report_code="audioexport.document_compose_report_invalid",
++        geometry_code="audioexport.document_compose_geometry_mismatch",
++        item_label="document compose report",
++    )
++    return ComposedDocument(
++        id=_DOCUMENT_ID,
++        path=source,
++        sha256=actual_sha256,
++        sample_rate=rate,
++        channels=channels,
++        frames=frames,
++        duration_seconds=duration,
++        render_profile_id=str(report["render_profile_id"]).strip(),
++        source_plan_id=str(report["source_plan_id"]).strip(),
++        render_plan_id=str(report["render_plan_id"]).strip(),
++        render_manifest_id=str(report["render_manifest_id"]).strip(),
++        output_policy_id=str(report["output_policy_id"]).strip(),
++        audiojob_id=str(report["audiojob_id"]).strip(),
++    )
++
++
++def resolve_document_export(
++    document: str | Path,
++    *,
++    variant: str,
++    audiocompose_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++) -> DocumentExportContext:
++    """Resolve and verify the immediate AudioCompose handoff, without writing files."""
++    safe = safe_variant(variant, error_code="audioexport.document_variant_invalid")
++    workspace = _workspace_for_document(document)
++    manifest_path = workspace / "manifest.json"
++    _read_manifest(manifest_path)
++    compose_root = resolve_stage_root(
++        workspace,
++        audiocompose_root,
++        stage_name="audiocompose",
++        missing_code="audioexport.document_compose_report_missing",
++        invalid_code="audioexport.document_compose_report_invalid",
++    )
++    variant_dir = _variant_directory(compose_root, safe)
++    report_path = variant_dir / "compose-report.toml"
++    report = _read_compose_report(report_path, safe)
++    composed = _verified_document(variant_dir, report)
++    selected_output_root = (
++        Path(output_root).expanduser() if output_root is not None else workspace / "audioexport"
++    )
++    if not selected_output_root.is_absolute():
++        selected_output_root = Path.cwd() / selected_output_root
++    name = workspace.name
++    if name.casefold().endswith(".ssmdoc"):
++        name = name[: -len(".ssmdoc")]
++    if not name:
++        name = "document"
++    return DocumentExportContext(
++        workspace=workspace,
++        variant=safe,
++        manifest_path=manifest_path,
++        compose_report_path=report_path,
++        document=composed,
++        output_root=selected_output_root.absolute() / safe,
++        default_stem=name,
++    )
++
++
++def export_document(
++    document: str | Path,
++    *,
++    variant: str,
++    output: str | Path | None = None,
++    format: str | None = None,
++    bitrate: str | int | None = None,
++    metadata: Mapping[str, str] | None = None,
++    cover: str | Path | None = None,
++    timeline: str | Path | None = None,
++    audiocompose_root: str | Path | None = None,
++    output_root: str | Path | None = None,
++    force: bool = False,
++    ffmpeg: str | Path | None = None,
++    ffprobe: str | Path | None = None,
++) -> DocumentExportResult:
++    """Encode one verified document WAV through the generic AudioExport pipeline."""
++    context = resolve_document_export(
++        document,
++        variant=variant,
++        audiocompose_root=audiocompose_root,
++        output_root=output_root,
++    )
++    if format is not None:
++        selected_format = normalize_format(format)
++    elif output is not None:
++        selected_format = normalize_format(Path(output).suffix)
++    else:
++        raise _fail(
++            "document export requires a format or output filename extension",
++            code="audioexport.document_format_required",
++        )
++    destination = (
++        Path(output).expanduser()
++        if output is not None
++        else context.output_root / f"{context.default_stem}{FORMATS[selected_format].extension}"
++    )
++    result = encode(
++        context.document.path,
++        destination,
++        format=selected_format,
++        bitrate=bitrate,
++        metadata=metadata,
++        cover=cover,
++        timeline=timeline,
++        force=force,
++        ffmpeg=ffmpeg,
++        ffprobe=ffprobe,
++    )
++    return DocumentExportResult(
++        workspace=context.workspace,
++        variant=context.variant,
++        document_id=context.document.id,
++        input_compose_report=context.compose_report_path,
++        source=context.document.path,
++        output=result.path,
++        sidecar=result.manifest_path,
++        export=result,
++        document=context.document,
++    )
+diff --git a/audioexport/formats.py b/audioexport/formats.py
+index 0611d42..6386b60 100644
+--- a/audioexport/formats.py
++++ b/audioexport/formats.py
+@@ -1,4 +1,4 @@
+-"""Explicit FFmpeg encoder/container policy, not Readio-dependent."""
++"""Explicit FFmpeg encoder and container policy."""
+
+ from __future__ import annotations
+
+@@ -67,7 +67,7 @@ def normalize_bitrate(value: str | int | None, fmt: str) -> str | None:
+         raise InvalidExportError(
+             f"bitrate is not supported for {fmt}", code="audioexport.bitrate_unsupported"
+         )
+-    # Adapted from Readio's normalize_bitrate, with a strict integer bits/s form.
++    # Bare values are bits/s; k and m suffixes specify their units.
+     text = str(value).strip()
+     match = re.fullmatch(r"(\d+)([kKmM]?)", text)
+     if match is None or int(match[1]) <= 0:
+diff --git a/docs/index.md b/docs/index.md
+index 293fdfa..2b08b92 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -2,14 +2,13 @@
+
+ `audioexport` is a standalone Python library and command-line interface for
+ exporting audio through FFmpeg. It accepts any FFmpeg-decodable audio source
+-and produces reproducible, verified output artifacts without importing Readio,
+-AudioCompose, UtterPlan, or a synthesis engine.
++and produces reproducible, verified output artifacts with no runtime dependencies on
++planning, synthesis, or composition packages.
+
+ ```{toctree}
+ :maxdepth: 2
+ :caption: Documentation
+
+-readio-migration
+ changelog
+ ```
+
+@@ -127,7 +126,27 @@ result = export_book(
+ print(result.output, result.selected_chapter_ids)
+ ```
+
+-`BookExportContext`, `BookExportResult`, and `ComposedChapter` describe resolved inputs and export results. This adapter does not run AudioCompose or modify Readio project state.
++`BookExportContext`, `BookExportResult`, and `ComposedChapter` describe resolved inputs and export results. This adapter consumes the immediate AudioCompose handoff and does not modify upstream pipeline stages.
++
++## Native `.ssmdoc` export
++
++`export-document` consumes the immediate `audiocompose/<variant>/compose-report.toml` and its verified `document-0001.wav`. It validates the SSMDDoc v1 manifest, exact variant, report status, output path, digest, and WAV geometry, then delegates final output to the generic encoder. Earlier stage directories are not required.
++
++```bash
++audioexport export-document story.ssmdoc \
++  --variant "$VARIANT" \
++  --format mp3 \
++  --title "Story"
++```
++
++The default output is `audioexport/<variant>/<workspace-name>.<format>` with the standard adjacent AudioExport sidecar. The caller selects the exact variant and a format or output extension; tags, cover art, and a generic timeline are explicit inputs.
++
++```python
++from audioexport import export_document, resolve_document_export
++
++context = resolve_document_export("story.ssmdoc", variant=variant)  # read-only
++result = export_document("story.ssmdoc", variant=variant, format="mp3")
++```
+
+ ## Python API
+
+@@ -158,6 +177,7 @@ Important public entry points include:
+ - `run_profile()` for multiple configured outputs
+ - `build_audiobook()` for ordered-track assembly
+ - `export_book()` and `resolve_book_export()` for verified composed-book export; `BookExportContext`, `BookExportResult`, and `ComposedChapter` describe its public results
++- `export_document()` and `resolve_document_export()` for verified composed-document export; `ComposedDocument`, `DocumentExportContext`, and `DocumentExportResult` describe its inputs and results
+ - `preflight_profile()` for read-only profile validation
+ - `doctor()` and `probe()` for tool and artifact diagnostics
+ - `load_profile()` and `load_audiobook_profile()` for TOML profiles
+@@ -182,6 +202,4 @@ by a per-target process lock.
+
+ - [`README.md`](https://github.com/buchwandler/audioexport/blob/main/README.md) —
+   complete usage reference and examples
+-- [Readio migration notes](readio-migration.md) — compatibility boundaries and
+-  the planned integration shape
+ - [Changelog](changelog.md) — release history
+diff --git a/docs/readio-migration.md b/docs/readio-migration.md
+deleted file mode 100644
+index 2eb60f8..0000000
+--- a/docs/readio-migration.md
++++ /dev/null
+@@ -1,87 +0,0 @@
+-# Readio -> audioexport: compatibility-first extraction
+-
+-**Reference inputs**: uploaded Readio Codecrate snapshot (2026-10-08) and `02_readio_modular_migration_roadmap.md`, milestone 06. This is an **implementation guide**, not an applied Readio patch.
+-
+-## What was extracted/adapted
+-
+-| Readio source                                                                                    | Independent implementation                                                             | Kept in Readio for now                                                                                               |
+-| ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+-| `readio/formats.py` format mappings + capability checks                                          | `audioexport/formats.py`, `audioexport/fftools.py` explicit FFmpeg mapping, `doctor()` | Readio's original public format detection and messages                                                               |
+-| `readio/wave.py` FFmpeg sink for M4A/Opus                                                        | `audioexport/pipeline.py` file-to-file FFmpeg argv encoding, all codecs                | Readio's streaming PCM sink and live `speak` path                                                                    |
+-| `readio/stages/export.py` bitrate normalization, export ID, output replacement                   | `audioexport/formats.py` bitrate; `pipeline.py` own export identity and sidecars       | `readio.export-state`, project lock, existing export identity and cache index                                        |
+-| `readio/stages/audiobook_export.py` metadata escaping, timeline chapters, M4B command and checks | `audioexport/chapters.py`, `audioexport/pipeline.py` FFmetadata/M4B/cover/FFprobe      | Readio's audiobook metadata defaults, project & timeline freshness checks, cover selection, audiobook-state identity |
+-
+-The new independent package is not a verbatim file move: generic FFmpeg/chapter logic was adapted and decoupled from `Project`, `soundfile`, `numpy`, `audiocompose`, and Readio exception classes. M4B chapter timelines can be read as-is, without importing Readio.
+-
+-## Current state
+-
+-**No existing Readio files are changed by this archive**. In particular, no import from `readio` appears in `audioexport/`. There is no dependency from `audioexport` to UtterPlan, AudioCompose, VoiceRender, or Readio. Readio still owns its complete legacy fallback; switching it to this exporter is an intentionally separate step.
+-
+-## Next PR, in the Readio repository
+-
+-1. Capture golden baseline for `readio export` (WAV/FLAC/MP3/M4A/OGG/Opus), `readio audiobook export` (M4B metadata/chapters/cover), `readio speak --format`, cache/status/force; verify existing test suites.
+-2. Publish an installable audioexport release; pin an explicitly tested version range in Readio, initially via an optional `audioexport` extra or mandatory dep only when stabilized.
+-3. Add a **feature-flagged bridge**, e.g. environment/config `READIO_AUDIOEXPORT=1`. Leave default/legacy execution untouched initially. The bridge's only encoding operation is `audioexport.encode(...)` from Python, **not a subprocess invocation of `audioexport` CLI**.
+-4. In `readio/stages/export.py`, load the `audioexport.profile.v1` once and call `preflight_profile(profile, master, ffmpeg=..., ffprobe=...)` before any export write. Preflight returns `ResolvedOutput` values in TOML order, but has no destination/output-directory input and does not write or authorize replacement. For each selected output, Readio chooses its target and performs its own project freshness, collision/ownership/provenance, overwrite-authorization, lock, and state checks before calling `encode()` with the resolved format, bitrate, profile metadata, cover, and timeline. Readio then updates its own state/index/result. A single-spec operation may use `resolve_output()`; use full preflight when all configured outputs must validate.
+-5. In `readio/stages/audiobook_export.py`, retain `prepare_audiobook_export()` and its project freshness checks. If the bridge uses an `audioexport.profile.v1` profile for the prepared master, load it once and preflight its complete output list before writing; Readio still performs its own target-ownership and overwrite checks before encoding. Pass the resolved timeline, cover, effective bitrate, and profile metadata along with `prepared.master` to `encode()`. Preserve Readio's title/author mapping, error-code translations, and return fields, including `chapter_count`.
+-6. Keep the old encoding path for `speak --format` until stream/buffer parity is explicitly addressed: `audioexport.encode()` consumes an **existing file**, whereas `readio/wave.py` currently also supports **PCM streaming**. An intermediate temporary WAV adapter can work but should be isolated/tested, not silently forced on the live path.
+-7. Run the existing Readio format, export, audiobook, CLI, API and project-state test suites. On parity, enable the flag progressively, then deprecate the redundant encoding implementation in a later PR. Rollback = feature flag off; never delete last-good artifacts.
+-
+-## Profile-based bridge shape (illustrative, not a drop-in patch)
+-
+-```python
+-from pathlib import Path
+-from audioexport import encode, load_profile, preflight_profile
+-
+-# Load the profile once, then prove all configured outputs are encodable before writing.
+-profile = load_profile(profile_path)
+-resolved_outputs = preflight_profile(
+-    profile,
+-    master,
+-    ffmpeg=ffmpeg,
+-    ffprobe=ffprobe,
+-)
+-
+-for resolved in resolved_outputs:
+-    target = Path(readio_destination) / resolved.filename
+-
+-    # Readio-owned checks happen after read-only preflight and before encode:
+-    # freshness, project lock, destination collision/ownership, provenance,
+-    # overwrite authorization, and state policy.
+-    result = encode(
+-        master,
+-        target,
+-        format=resolved.format,
+-        bitrate=resolved.bitrate,
+-        metadata=profile.metadata,
+-        cover=resolved.cover,
+-        timeline=resolved.timeline,
+-        force=readio_authorized_replace,
+-        ffmpeg=ffmpeg,
+-        ffprobe=ffprobe,
+-    )
+-
+-    # Readio stores its own state/index/result after each successful encode.
+-```
+-
+-`preflight_profile()` never takes an output directory or chooses a target. It validates the complete loaded profile without creating audio, manifests, temporary files, or directories. A caller can instead call `resolve_output(profile, spec, source_stem)` when it only needs one selected output's effective settings; it still must run the appropriate Readio checks before writing.
+-
+-**Important nuance:** For `readio export` with a tracked file that has changed inputs, using a new sidecar for the first time means the target appears untracked to audioexport. While bridging, Readio must explicitly authorize replace by passing `force=True` **only after Readio's own ownership check**; this applies even when its existing `force` flag was false. Never broaden replacement for arbitrary external targets.
+-
+-For M4B the existing Readio source validates `composition-state` against master/timeline digests before export. AudioExport validates chapter JSON and media, but it deliberately does not know the Readio project state. Those validations must remain in Readio's wrapper.
+-
+-## Differences to preserve or accept deliberately
+-
+-- Readio's generic MP3/FLAC/OGG were written using `soundfile`; AudioExport uses FFmpeg for all encoders, so bitstreams and encoder provenance differ (expected). Tests should compare format, basic audio duration/properties, metadata and semantic chapter times, not exact bytes.
+-- Readio's bitrate CLI historically supports only M4A and Opus for generic `export`; AudioExport also supports MP3, OGG and M4B. Keep old Readio validation on the bridge until changing Readio's public contract deliberately.
+-- AudioExport's `audioexport.manifest.v1` is independent of Readio `readio.export-state`, and its identity includes source hashes, metadata/cover/chapters and FFmpeg/FFprobe version. Readio must not mistake the new sidecar for the old project index.
+-- A Readio sample-based timeline is supported, but its original project plan/metadata IDs are intentionally not validated outside Readio.
+-- Export-only change never triggers voice synthesis or composition. Readio's current project-level freshness must remain the source of truth.
+-
+-## Acceptance gates before switching Readio by default
+-
+-- All 7 standalone formats encode in CI and produce correct probed codec.
+-- M4B chapter order/title/starts/ends, cover, and author/title tags survive.
+-- Changes to bitrate/title/cover affect export only, and unchanged exports are reusable.
+-- Readio's `export`, `audiobook export`, and `speak` old signatures, errors, project indexes, and project state survive.
+-- No circular dependencies; last-good project remains readable/resumable.
+diff --git a/tests/test_api_import.py b/tests/test_api_import.py
+index 9d3c5e0..6c19e2a 100644
+--- a/tests/test_api_import.py
++++ b/tests/test_api_import.py
+@@ -7,12 +7,17 @@ from audioexport import (
+     BookExportContext,
+     BookExportResult,
+     ComposedChapter,
++    ComposedDocument,
++    DocumentExportContext,
++    DocumentExportResult,
+     api,
+     build_audiobook,
+     encode,
+     export_book,
++    export_document,
+     preflight_profile,
+     resolve_book_export,
++    resolve_document_export,
+     resolve_output,
+ )
+
+@@ -26,8 +31,13 @@ def test_flat_public_api() -> None:
+         (BookExportContext, api.BookExportContext),
+         (BookExportResult, api.BookExportResult),
+         (ComposedChapter, api.ComposedChapter),
++        (ComposedDocument, api.ComposedDocument),
++        (DocumentExportContext, api.DocumentExportContext),
++        (DocumentExportResult, api.DocumentExportResult),
+         (export_book, api.export_book),
++        (export_document, api.export_document),
+         (resolve_book_export, api.resolve_book_export),
++        (resolve_document_export, api.resolve_document_export),
+     )
+     assert all(root_symbol is api_symbol for root_symbol, api_symbol in public_pairs)
+     assert AudiobookTrack.__name__ == "AudiobookTrack"
+@@ -40,8 +50,13 @@ def test_flat_public_api() -> None:
+         "BookExportContext",
+         "BookExportResult",
+         "ComposedChapter",
++        "ComposedDocument",
++        "DocumentExportContext",
++        "DocumentExportResult",
+         "export_book",
++        "export_document",
+         "resolve_book_export",
++        "resolve_document_export",
+     }
+     assert public_symbols.issubset(audioexport.__all__)
+     assert public_symbols.issubset(api.__all__)
+diff --git a/tests/test_chapter_precision.py b/tests/test_chapter_precision.py
+index 318adf1..9acba87 100644
+--- a/tests/test_chapter_precision.py
++++ b/tests/test_chapter_precision.py
+@@ -19,7 +19,6 @@ def test_sample_chapter_precision_and_escaping(
+     timeline.write_text(
+         json.dumps(
+             {
+-                "format": "readio.composition-timeline",
+                 "sample_rate": sample_rate,
+                 "chapters": [
+                     {"title": "Intro", "start_sample": 0},
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index db44d0e..6bd0f11 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -300,3 +300,158 @@ def test_cli_export_book_end_to_end_json_human_reuse_and_force(
+     forced = _run(*arguments, "--force", "--json")
+     assert forced.returncode == 0, forced.stderr
+     assert json.loads(forced.stdout)["reused"] is False
++
++
++def _document_fixture(tmp_path: Path, wav: Path) -> tuple[Path, str]:
++    variant = "printer-cast--28f616b6fe3b"
++    workspace = tmp_path / "story.ssmdoc"
++    workspace.mkdir()
++    (workspace / "manifest.json").write_text(
++        json.dumps(
++            {
++                "format": "ssmdconvert.document",
++                "schema_version": 1,
++                "document": {"id": "document-0001", "path": "document.ssmd.md"},
++            }
++        ),
++        encoding="utf-8",
++    )
++    (workspace / "document.ssmd.md").write_text("# Story\n", encoding="utf-8")
++    variant_dir = workspace / "audiocompose" / variant
++    variant_dir.mkdir(parents=True)
++    artifact = variant_dir / "document-0001.wav"
++    shutil.copy2(wav, artifact)
++    report = {
++        "format": "audiocompose-document-report",
++        "version": 1,
++        "document_id": "document-0001",
++        "variant": variant,
++        "render_profile_id": "profile-id",
++        "source_plan_id": "source-plan-id",
++        "render_plan_id": "render-plan-id",
++        "render_manifest_id": "render-manifest-id",
++        "render_manifest_sha256": "render-manifest-sha",
++        "render_diagnostics_sha256": "render-diagnostics-sha",
++        "pause_policy_id": "pause-policy-id",
++        "pause_policy_provenance": "renderprofile",
++        "output_policy_id": "output-policy-id",
++        "audiojob_id": "audiojob-id",
++        "audiojob_schema_version": 2,
++        "audiocompose_version": "0.3.1",
++        "status": "written",
++        "output": artifact.name,
++        "sha256": f"sha256:{hashlib.sha256(artifact.read_bytes()).hexdigest()}",
++        "sample_rate": 24000,
++        "channels": 1,
++        "frames": 48000,
++        "duration_seconds": 2.0,
++    }
++    (variant_dir / "compose-report.toml").write_text(
++        "\n".join(f"{key} = {json.dumps(value)}" for key, value in report.items()) + "\n",
++        encoding="utf-8",
++    )
++    return workspace, variant
++
++
++def test_cli_export_document_json_human_reuse_and_metadata(
++    wav: Path, tmp_path: Path, have_tools: None
++) -> None:
++    workspace, variant = _document_fixture(tmp_path, wav)
++    arguments = (
++        "export-document",
++        str(workspace),
++        "--variant",
++        variant,
++        "--format",
++        "mp3",
++        "--metadata",
++        "title=metadata title",
++        "--title",
++        "CLI title",
++        "--artist",
++        "CLI artist",
++        "--album",
++        "CLI album",
++    )
++    first = _run(*arguments, "--json")
++    assert first.returncode == 0, first.stderr
++    result = json.loads(first.stdout)
++    output = workspace / "audioexport" / variant / "story.mp3"
++    assert result["workspace"] == str(workspace)
++    assert result["variant"] == variant
++    assert result["document_id"] == "document-0001"
++    assert result["input_compose_report"].endswith("compose-report.toml")
++    assert result["source"].endswith("document-0001.wav")
++    assert result["output"] == str(output)
++    assert Path(result["sidecar"]).is_file()
++    assert result["export_identity"].startswith("sha256:")
++    assert result["output_sha256"]
++    assert result["reused"] is False
++    assert not first.stdout.startswith("workspace:")
++
++    inspected = json.loads(_run("inspect", str(output), "--json").stdout)
++    tags = {key.lower(): value for key, value in inspected["format"].get("tags", {}).items()}
++    assert tags["title"] == "CLI title"
++    assert tags["artist"] == "CLI artist"
++    assert tags["album"] == "CLI album"
++
++    repeated = _run(*arguments, "--json")
++    assert repeated.returncode == 0, repeated.stderr
++    assert json.loads(repeated.stdout)["reused"] is True
++
++    human = _run(*arguments)
++    assert human.returncode == 0, human.stderr
++    for field in (
++        "workspace:",
++        "variant:",
++        "document: document-0001",
++        "input compose report:",
++        "source:",
++        "output:",
++        "export identity:",
++        "duration:",
++        "codec/sample-rate/channels:",
++        "reused: yes",
++    ):
++        assert field in human.stdout
++
++    inferred_output = tmp_path / "inferred.opus"
++    inferred = _run(
++        "export-document",
++        str(workspace),
++        "--variant",
++        variant,
++        "--output",
++        str(inferred_output),
++        "--json",
++    )
++    assert inferred.returncode == 0, inferred.stderr
++    inferred_payload = json.loads(inferred.stdout)
++    assert inferred_payload["format"] == "opus"
++    assert inferred_payload["output"] == str(inferred_output)
++
++
++def test_cli_export_document_errors_are_json_and_stable(tmp_path: Path) -> None:
++    result = _run(
++        "export-document",
++        str(tmp_path / "bad.ssmdoc"),
++        "--variant",
++        "v1",
++        "--format",
++        "mp3",
++        "--json",
++    )
++
++    assert result.returncode == 2
++    assert result.stderr == ""
++    payload = json.loads(result.stdout)
++    assert payload["error"]["code"] == "audioexport.document_workspace_invalid"
++    assert payload["error"]["message"]
++
++
++def test_cli_export_document_requires_format_or_output(wav: Path, tmp_path: Path) -> None:
++    workspace, variant = _document_fixture(tmp_path, wav)
++    result = _run("export-document", str(workspace), "--variant", variant, "--json")
++
++    assert result.returncode == 2
++    assert json.loads(result.stdout)["error"]["code"] == "audioexport.document_format_required"
+diff --git a/tests/test_core.py b/tests/test_core.py
+index 4edc3c0..0f3979b 100644
+--- a/tests/test_core.py
++++ b/tests/test_core.py
+@@ -51,7 +51,6 @@ def test_timeline_and_chapters(tmp_path: Path) -> None:
+     file.write_text(
+         json.dumps(
+             {
+-                "format": "readio.composition-timeline",
+                 "sample_rate": 24000,
+                 "chapters": [
+                     {"scope_id": "a", "title": "Hello", "start_sample": 0},
+@@ -101,12 +100,11 @@ def test_source_options_and_no_clobber(wav: Path, have_tools: None) -> None:
+         encode(wav, wav, format="wav")
+
+
+-def test_m4b_chapters_reado_and_metadata(wav: Path, tmp_path: Path, have_tools: None) -> None:
++def test_m4b_sample_chapters_and_metadata(wav: Path, tmp_path: Path, have_tools: None) -> None:
+     timeline = tmp_path / "timeline.json"
+     timeline.write_text(
+         json.dumps(
+             {
+-                "format": "readio.composition-timeline",
+                 "sample_rate": 24000,
+                 "chapters": [
+                     {"title": "First", "start_sample": 0},
+diff --git a/tests/test_document.py b/tests/test_document.py
+new file mode 100644
+index 0000000..38601b1
+--- /dev/null
++++ b/tests/test_document.py
+@@ -0,0 +1,526 @@
++from __future__ import annotations
++
++import hashlib
++import json
++import shutil
++import wave
++import zipfile
++from pathlib import Path
++from typing import Any
++
++import pytest
++
++from audioexport.document import export_document, resolve_document_export
++from audioexport.errors import AudioExportError
++from audioexport.pipeline import ExportResult
++
++VARIANT = "printer-cast--28f616b6fe3b"
++DOCUMENT_ID = "document-0001"
++
++
++def _write_wav(
++    path: Path, *, sample_rate: int = 8000, channels: int = 1, frames: int = 800
++) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with wave.open(str(path), "wb") as target:
++        target.setnchannels(channels)
++        target.setsampwidth(2)
++        target.setframerate(sample_rate)
++        target.writeframes(b"\0\0" * frames * channels)
++
++
++def _workspace(tmp_path: Path) -> tuple[Path, Path, dict[str, Any]]:
++    workspace = tmp_path / "story.ssmdoc"
++    workspace.mkdir(parents=True)
++    (workspace / "manifest.json").write_text(
++        json.dumps(
++            {
++                "format": "ssmdconvert.document",
++                "schema_version": 1,
++                "document": {"id": DOCUMENT_ID, "path": "document.ssmd.md"},
++            }
++        ),
++        encoding="utf-8",
++    )
++    (workspace / "document.ssmd.md").write_text("# Story\n", encoding="utf-8")
++    variant_dir = workspace / "audiocompose" / VARIANT
++    wav_path = variant_dir / f"{DOCUMENT_ID}.wav"
++    _write_wav(wav_path)
++    report: dict[str, Any] = {
++        "format": "audiocompose-document-report",
++        "version": 1,
++        "document_id": DOCUMENT_ID,
++        "variant": VARIANT,
++        "render_profile_id": "sha256:render-profile",
++        "source_plan_id": "sha256:source-plan",
++        "render_plan_id": "sha256:render-plan",
++        "render_manifest_id": "sha256:render-manifest",
++        "render_manifest_sha256": "sha256:render-manifest-hash",
++        "render_diagnostics_sha256": "sha256:render-diagnostics-hash",
++        "pause_policy_id": "sha256:pause-policy",
++        "pause_policy_provenance": "renderprofile",
++        "output_policy_id": "sha256:output-policy",
++        "audiojob_id": "sha256:audiojob",
++        "audiojob_schema_version": 2,
++        "audiocompose_version": "0.3.1",
++        "status": "written",
++        "output": f"{DOCUMENT_ID}.wav",
++        "sha256": f"sha256:{hashlib.sha256(wav_path.read_bytes()).hexdigest()}",
++        "sample_rate": 8000,
++        "channels": 1,
++        "frames": 800,
++        "duration_seconds": 0.1,
++    }
++    _write_report(variant_dir / "compose-report.toml", report)
++    return workspace, wav_path, report
++
++
++def _write_report(path: Path, report: dict[str, Any]) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    lines = [f"{key} = {json.dumps(value)}" for key, value in report.items()]
++    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
++
++
++def _resolve(workspace: Path) -> Any:
++    return resolve_document_export(workspace, variant=VARIANT)
++
++
++def _assert_code(call: Any, expected: str) -> None:
++    with pytest.raises(AudioExportError) as error:
++        call()
++    assert error.value.code == expected
++
++
++def test_resolves_workspace_and_canonical_source_without_creating_output(tmp_path: Path) -> None:
++    workspace, wav_path, _ = _workspace(tmp_path)
++
++    context = resolve_document_export(workspace, variant=VARIANT)
++    from_source = resolve_document_export(workspace / "document.ssmd.md", variant=VARIANT)
++
++    assert context == from_source
++    assert context.workspace == workspace
++    assert context.document.id == DOCUMENT_ID
++    assert context.document.path == wav_path
++    assert context.document.sample_rate == 8000
++    assert context.document.channels == 1
++    assert context.document.frames == 800
++    assert context.document.duration_seconds == pytest.approx(0.1)
++    assert context.output_root == workspace / "audioexport" / VARIANT
++    assert context.default_stem == "story"
++    assert not (workspace / "audioexport").exists()
++
++
++def test_accepts_bare_sha256_and_reused_status(tmp_path: Path) -> None:
++    workspace, wav_path, report = _workspace(tmp_path)
++    report["sha256"] = hashlib.sha256(wav_path.read_bytes()).hexdigest()
++    report["status"] = "reused"
++    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
++
++    assert _resolve(workspace).document.sha256 == report["sha256"]
++
++
++@pytest.mark.parametrize(
++    ("field", "value"),
++    [
++        ("format", "audiocompose-book-report"),
++        ("version", 2),
++        ("version", True),
++        ("document_id", "document-0002"),
++        ("variant", "other-variant"),
++        ("render_profile_id", ""),
++        ("audiojob_id", None),
++        ("audiojob_schema_version", 1),
++    ],
++)
++def test_rejects_invalid_compose_report_identity_or_provenance(
++    tmp_path: Path, field: str, value: Any
++) -> None:
++    workspace, _, report = _workspace(tmp_path)
++    report[field] = value
++    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
++
++    expected = (
++        "audioexport.document_compose_item_unusable"
++        if field == "status"
++        else "audioexport.document_compose_report_invalid"
++    )
++    _assert_code(lambda: _resolve(workspace), expected)
++
++
++def test_rejects_unusable_status_and_missing_status(tmp_path: Path) -> None:
++    workspace, _, report = _workspace(tmp_path)
++    report["status"] = "failed"
++    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_item_unusable")
++
++    del report["status"]
++    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_item_unusable")
++
++
++@pytest.mark.parametrize(
++    "manifest",
++    [
++        {
++            "format": "wrong",
++            "schema_version": 1,
++            "document": {"id": DOCUMENT_ID, "path": "document.ssmd.md"},
++        },
++        {
++            "format": "ssmdconvert.document",
++            "schema_version": True,
++            "document": {"id": DOCUMENT_ID, "path": "document.ssmd.md"},
++        },
++        {"format": "ssmdconvert.document", "schema_version": 1},
++        {
++            "format": "ssmdconvert.document",
++            "schema_version": 1,
++            "document": {"id": "story", "path": "document.ssmd.md"},
++        },
++        {
++            "format": "ssmdconvert.document",
++            "schema_version": 1,
++            "document": {"id": DOCUMENT_ID, "path": "../document.ssmd.md"},
++        },
++        {
++            "format": "ssmdconvert.document",
++            "schema_version": 1,
++            "document": {"id": DOCUMENT_ID, "path": "/document.ssmd.md"},
++        },
++        {
++            "format": "ssmdconvert.document",
++            "schema_version": 1,
++            "document": {"id": DOCUMENT_ID, "path": "C:document.ssmd.md"},
++        },
++    ],
++)
++def test_rejects_invalid_manifest_contract(tmp_path: Path, manifest: dict[str, Any]) -> None:
++    workspace, _, _ = _workspace(tmp_path)
++    (workspace / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
++
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_manifest_invalid")
++
++
++def test_rejects_duplicate_manifest_keys(tmp_path: Path) -> None:
++    workspace, _, _ = _workspace(tmp_path)
++    (workspace / "manifest.json").write_text(
++        '{"format":"ssmdconvert.document","format":"ssmdconvert.document",'
++        '"schema_version":1,"document":{"id":"document-0001",'
++        '"path":"document.ssmd.md"}}',
++        encoding="utf-8",
++    )
++
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_manifest_invalid")
++
++
++def test_rejects_missing_or_symlinked_manifest_and_source(tmp_path: Path) -> None:
++    workspace, _, _ = _workspace(tmp_path / "missing-manifest")
++    (workspace / "manifest.json").unlink()
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_manifest_invalid")
++
++    workspace, _, _ = _workspace(tmp_path / "symlink-manifest")
++    manifest = workspace / "manifest.json"
++    saved_manifest = tmp_path / "manifest-backup.json"
++    saved_manifest.write_bytes(manifest.read_bytes())
++    manifest.unlink()
++    manifest.symlink_to(saved_manifest)
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_manifest_invalid")
++
++    workspace, _, _ = _workspace(tmp_path / "symlink-source")
++    source = workspace / "document.ssmd.md"
++    saved_source = tmp_path / "document-backup.md"
++    saved_source.write_bytes(source.read_bytes())
++    source.unlink()
++    source.symlink_to(saved_source)
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_manifest_invalid")
++
++    workspace, _, _ = _workspace(tmp_path / "missing-source")
++    (workspace / "document.ssmd.md").unlink()
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_manifest_invalid")
++
++
++def test_rejects_unrecognized_workspace_input_and_zip(tmp_path: Path) -> None:
++    workspace, _, _ = _workspace(tmp_path)
++    arbitrary = workspace / "notes.txt"
++    arbitrary.write_text("notes", encoding="utf-8")
++    archive = tmp_path / "story.zip"
++    with zipfile.ZipFile(archive, "w") as bundle:
++        bundle.writestr("manifest.json", "{}")
++
++    _assert_code(
++        lambda: resolve_document_export(arbitrary, variant=VARIANT),
++        "audioexport.document_workspace_invalid",
++    )
++    _assert_code(
++        lambda: resolve_document_export(archive, variant=VARIANT),
++        "audioexport.document_workspace_invalid",
++    )
++
++
++@pytest.mark.parametrize(
++    "variant",
++    [
++        "",
++        ".",
++        "..",
++        "../other",
++        "/tmp/variant",
++        "foo/bar",
++        "foo\\bar",
++        "C:variant",
++        "\x00bad",
++        "\x01bad",
++        "\x7f",
++    ],
++)
++def test_rejects_unsafe_variant_without_output_creation(tmp_path: Path, variant: str) -> None:
++    workspace, _, _ = _workspace(tmp_path)
++
++    _assert_code(
++        lambda: resolve_document_export(workspace, variant=variant),
++        "audioexport.document_variant_invalid",
++    )
++    assert not (workspace / "audioexport").exists()
++
++
++def test_unknown_variant_does_not_create_output_root(tmp_path: Path) -> None:
++    workspace, _, _ = _workspace(tmp_path)
++
++    _assert_code(
++        lambda: resolve_document_export(workspace, variant="unknown"),
++        "audioexport.document_compose_report_missing",
++    )
++    assert not (workspace / "audioexport").exists()
++
++
++@pytest.mark.parametrize(
++    ("field", "value", "expected"),
++    [
++        ("output", "../document.wav", "audioexport.document_compose_output_invalid"),
++        ("output", "/subdir/document.wav", "audioexport.document_compose_output_invalid"),
++        ("output", "C:\\document-0001.wav", "audioexport.document_compose_output_invalid"),
++        ("output", "folder/../document-0001.wav", "audioexport.document_compose_output_invalid"),
++        ("output", "wrong.wav", "audioexport.document_compose_output_invalid"),
++        ("output", "missing/document-0001.wav", "audioexport.document_compose_output_invalid"),
++        ("sha256", "xyz", "audioexport.document_compose_report_invalid"),
++    ],
++)
++def test_rejects_unsafe_or_invalid_report_output(
++    tmp_path: Path, field: str, value: Any, expected: str
++) -> None:
++    workspace, _, report = _workspace(tmp_path)
++    report[field] = value
++    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
++
++    _assert_code(lambda: _resolve(workspace), expected)
++
++
++def test_rejects_output_symlink_and_directory(tmp_path: Path) -> None:
++    workspace, wav_path, report = _workspace(tmp_path)
++    outside = tmp_path / "outside.wav"
++    outside.write_bytes(wav_path.read_bytes())
++    wav_path.unlink()
++    wav_path.symlink_to(outside)
++    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_output_invalid")
++
++    wav_path.unlink()
++    wav_path.mkdir()
++    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_output_invalid")
++
++
++def test_missing_symlinked_and_malformed_compose_reports(tmp_path: Path) -> None:
++    workspace, _, _ = _workspace(tmp_path / "missing")
++    report_path = workspace / "audiocompose" / VARIANT / "compose-report.toml"
++    report_path.unlink()
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_report_missing")
++
++    workspace, _, _ = _workspace(tmp_path / "malformed")
++    report_path = workspace / "audiocompose" / VARIANT / "compose-report.toml"
++    report_path.write_text("format = [", encoding="utf-8")
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_report_invalid")
++
++    workspace, _, _ = _workspace(tmp_path / "symlink")
++    report_path = workspace / "audiocompose" / VARIANT / "compose-report.toml"
++    target = tmp_path / "report-backup.toml"
++    target.write_bytes(report_path.read_bytes())
++    report_path.unlink()
++    report_path.symlink_to(target)
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_report_invalid")
++
++
++def test_rejects_report_hash_mismatch_before_encoder(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    workspace, wav_path, _ = _workspace(tmp_path)
++    wav_path.write_bytes(wav_path.read_bytes() + b"tamper")
++    invoked = False
++
++    def should_not_encode(*args: Any, **kwargs: Any) -> None:
++        nonlocal invoked
++        invoked = True
++        raise AssertionError("encoder must not run for an invalid composed source")
++
++    monkeypatch.setattr("audioexport.document.encode", should_not_encode)
++    _assert_code(
++        lambda: export_document(workspace, variant=VARIANT, format="mp3"),
++        "audioexport.document_compose_hash_mismatch",
++    )
++    assert not invoked
++
++
++@pytest.mark.parametrize(
++    ("field", "value", "expected"),
++    [
++        ("sample_rate", 16000, "audioexport.document_compose_geometry_mismatch"),
++        ("channels", 2, "audioexport.document_compose_geometry_mismatch"),
++        ("frames", 801, "audioexport.document_compose_geometry_mismatch"),
++        ("duration_seconds", 0.2, "audioexport.document_compose_geometry_mismatch"),
++        ("duration_seconds", -1, "audioexport.document_compose_report_invalid"),
++    ],
++)
++def test_rejects_reported_wav_geometry_mismatch(
++    tmp_path: Path, field: str, value: Any, expected: str
++) -> None:
++    workspace, _, report = _workspace(tmp_path)
++    report[field] = value
++    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
++
++    _assert_code(lambda: _resolve(workspace), expected)
++
++
++def test_rejects_non_wav_and_truncated_wav(tmp_path: Path) -> None:
++    workspace, wav_path, report = _workspace(tmp_path / "not-wav")
++    wav_path.write_bytes(b"not a wav")
++    report["sha256"] = hashlib.sha256(wav_path.read_bytes()).hexdigest()
++    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_geometry_mismatch")
++
++    workspace, wav_path, report = _workspace(tmp_path / "truncated")
++    wav_path.write_bytes(wav_path.read_bytes()[:-4])
++    report["sha256"] = hashlib.sha256(wav_path.read_bytes()).hexdigest()
++    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
++    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_geometry_mismatch")
++
++
++def _fake_export(path: Path, format: str) -> ExportResult:
++    return ExportResult(
++        path=path,
++        format=format,
++        codec="mp3" if format == "mp3" else "opus",
++        export_id="sha256:identity",
++        output_sha256="output-hash",
++        manifest_path=path.with_name(path.name + ".audioexport.json"),
++        reused=False,
++        chapter_count=0,
++    )
++
++
++def test_export_defaults_by_workspace_stem_and_forwards_options(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    workspace, wav_path, _ = _workspace(tmp_path)
++    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
++
++    def fake_encode(*args: Any, **kwargs: Any) -> ExportResult:
++        calls.append((args, kwargs))
++        return _fake_export(Path(args[1]), kwargs["format"])
++
++    monkeypatch.setattr("audioexport.document.encode", fake_encode)
++    cover = tmp_path / "cover.jpg"
++    timeline = tmp_path / "timeline.json"
++    metadata = {"title": "Story", "artist": "Author"}
++    result = export_document(
++        workspace,
++        variant=VARIANT,
++        format="MP3",
++        bitrate="192k",
++        metadata=metadata,
++        cover=cover,
++        timeline=timeline,
++        force=True,
++        ffmpeg="ffmpeg-custom",
++        ffprobe="ffprobe-custom",
++    )
++
++    expected = workspace / "audioexport" / VARIANT / "story.mp3"
++    assert result.source == wav_path
++    assert result.output == expected
++    assert result.sidecar == expected.with_name("story.mp3.audioexport.json")
++    assert result.to_dict()["export_identity"] == "sha256:identity"
++    assert result.to_dict()["render_manifest_id"] == "sha256:render-manifest"
++    assert calls == [
++        (
++            (wav_path, expected),
++            {
++                "format": "mp3",
++                "bitrate": "192k",
++                "metadata": metadata,
++                "cover": cover,
++                "timeline": timeline,
++                "force": True,
++                "ffmpeg": "ffmpeg-custom",
++                "ffprobe": "ffprobe-custom",
++            },
++        )
++    ]
++
++
++def test_format_infers_from_explicit_output_and_preserves_path(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    workspace, wav_path, _ = _workspace(tmp_path)
++    custom_output = tmp_path / "exports" / "custom.opus"
++    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
++
++    def fake_encode(*args: Any, **kwargs: Any) -> ExportResult:
++        calls.append((args, kwargs))
++        return _fake_export(Path(args[1]), kwargs["format"])
++
++    monkeypatch.setattr("audioexport.document.encode", fake_encode)
++    result = export_document(workspace, variant=VARIANT, output=custom_output)
++
++    assert result.output == custom_output
++    assert calls[0][0] == (wav_path, custom_output)
++    assert calls[0][1]["format"] == "opus"
++
++
++def test_format_is_required_without_format_or_output(tmp_path: Path) -> None:
++    workspace, _, _ = _workspace(tmp_path)
++
++    _assert_code(
++        lambda: export_document(workspace, variant=VARIANT),
++        "audioexport.document_format_required",
++    )
++
++
++def test_root_overrides_are_stage_roots(tmp_path: Path) -> None:
++    workspace, _, _ = _workspace(tmp_path)
++    custom_compose = tmp_path / "custom-compose"
++    custom_variant = custom_compose / VARIANT
++    shutil.copytree(workspace / "audiocompose" / VARIANT, custom_variant)
++    custom_output = tmp_path / "custom-export"
++
++    context = resolve_document_export(
++        workspace,
++        variant=VARIANT,
++        audiocompose_root=custom_compose,
++        output_root=custom_output,
++    )
++
++    assert context.compose_report_path == custom_variant / "compose-report.toml"
++    assert context.output_root == custom_output / VARIANT
++
++
++def test_relative_compose_root_is_resolved_under_workspace(tmp_path: Path) -> None:
++    workspace, _, _ = _workspace(tmp_path)
++    context = resolve_document_export(
++        workspace,
++        variant=VARIANT,
++        audiocompose_root=Path("audiocompose"),
++    )
++
++    assert (
++        context.compose_report_path == workspace / "audiocompose" / VARIANT / "compose-report.toml"
++    )

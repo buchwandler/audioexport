@@ -1,0 +1,43 @@
+rows:
+  - sha: e58afca5d042bd9c6d47c2b8f03b718f14d934a6
+    inspected: true
+    inspected_paths:
+      - README.md
+      - audioexport/__init__.py
+      - audioexport/_workspace.py
+      - audioexport/api.py
+      - audioexport/book.py
+      - audioexport/chapters.py
+      - audioexport/cli.py
+      - audioexport/document.py
+      - audioexport/formats.py
+      - docs/index.md
+      - docs/readio-migration.md
+      - tests/test_api_import.py
+      - tests/test_chapter_precision.py
+      - tests/test_cli.py
+      - tests/test_core.py
+      - tests/test_document.py
+    observed_behavior: "Introduced a verified .ssmdoc document-export path that reads the compose report, validates the rendered WAV and manifest, supports API and CLI export, infers formats, and records reusable export metadata"
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 97fc5681e7a1a3c9754d20dd29b05063c760539b
+    inspected: true
+    inspected_paths:
+      - audioexport/book.py
+      - audioexport/cli.py
+      - docs/changelog.md
+      - docs/index.md
+      - tests/test_book.py
+      - tests/test_cli.py
+    observed_behavior: "Added explicit AudioCompose and output-root overrides for book export while preserving explicit destinations, and exposed the verified compose-report path in API and CLI results"
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

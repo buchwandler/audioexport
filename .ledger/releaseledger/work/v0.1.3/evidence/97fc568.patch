@@ -1,0 +1,285 @@
+ audioexport/book.py | 12 +++++++++++-
+ audioexport/cli.py  | 16 +++++++++------
+ docs/changelog.md   |  2 ++
+ docs/index.md       | 36 ++++++++++++++++++----------------
+ tests/test_book.py  | 56 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/test_cli.py   | 31 +++++++++++++++++++++++++++++
+ 6 files changed, 129 insertions(+), 24 deletions(-)
+
+diff --git a/audioexport/book.py b/audioexport/book.py
+index 3822e3d..9588157 100644
+--- a/audioexport/book.py
++++ b/audioexport/book.py
+@@ -67,6 +67,7 @@ class BookExportResult:
+     output: Path
+     sidecar: Path
+     audiobook: AudiobookResult
++    input_compose_report: Path | None = None
+
+
+ def _fail(message: str, *, code: str = "audioexport.book_invalid") -> InvalidExportError:
+@@ -580,12 +581,20 @@ def export_book(
+     bitrate: str | int | None = None,
+     sample_rate: int | None = None,
+     channels: int | None = None,
++    audiocompose_root: str | Path | None = None,
++    output_root: str | Path | None = None,
+     force: bool = False,
+     ffmpeg: str | Path | None = None,
+     ffprobe: str | Path | None = None,
+ ) -> BookExportResult:
+     """Export selected chapters from a composed variant to a verified M4B."""
+-    context = resolve_book_export(book, variant=variant, chapters=chapters)
++    context = resolve_book_export(
++        book,
++        variant=variant,
++        chapters=chapters,
++        audiocompose_root=audiocompose_root,
++        output_root=output_root,
++    )
+     audiobook_profile = load_audiobook_profile(profile) if profile is not None else None
+     manifest = _read_manifest(context.manifest_path)
+     resolved_metadata = _resolved_metadata(manifest, audiobook_profile, metadata)
+@@ -637,4 +646,5 @@ def export_book(
+         output=audiobook.path,
+         sidecar=audiobook.manifest_path,
+         audiobook=audiobook,
++        input_compose_report=context.compose_report_path,
+     )
+diff --git a/audioexport/cli.py b/audioexport/cli.py
+index 964140f..3f952ca 100644
+--- a/audioexport/cli.py
++++ b/audioexport/cli.py
+@@ -114,6 +114,8 @@ def _parser() -> argparse.ArgumentParser:
+     export_book_parser.add_argument("--grouping")
+     export_book_parser.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
+     export_book_parser.add_argument("--cover", type=Path)
++    export_book_parser.add_argument("--audiocompose-root", type=Path)
++    export_book_parser.add_argument("--output-root", type=Path)
+     export_book_parser.add_argument("--force", action="store_true")
+     export_book_parser.add_argument("--json", action="store_true")
+     export_book_parser.add_argument("--ffmpeg")
+@@ -316,7 +318,14 @@ def main(argv: Sequence[str] | None = None) -> int:
+                 force=args.force,
+                 ffmpeg=args.ffmpeg,
+                 ffprobe=args.ffprobe,
++                audiocompose_root=args.audiocompose_root,
++                output_root=args.output_root,
+             )
++            if book_result.input_compose_report is None:
++                raise AudioExportError(
++                    "book export result is missing its verified input compose report",
++                    code="audioexport.error",
++                )
+             try:
+                 sidecar_payload = json.loads(book_result.sidecar.read_text(encoding="utf-8"))
+             except (OSError, ValueError) as exc:
+@@ -335,12 +344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
+                 "variant": book_result.variant,
+                 "selected_chapters": list(book_result.selected_chapter_ids),
+                 "selected_chapter_ids": list(book_result.selected_chapter_ids),
+-                "input_compose_report": str(
+-                    book_result.workspace
+-                    / "audiocompose"
+-                    / book_result.variant
+-                    / "compose-report.toml"
+-                ),
++                "input_compose_report": str(book_result.input_compose_report),
+                 "output": str(book_result.output),
+                 "sidecar": str(book_result.sidecar),
+                 "export_identity": book_result.audiobook.export_id,
+diff --git a/docs/changelog.md b/docs/changelog.md
+index 08fec85..6e7145d 100644
+--- a/docs/changelog.md
++++ b/docs/changelog.md
+@@ -6,6 +6,8 @@
+
+ - Added verified .ssmdbook-to-M4B export with manifest-ordered chapter selection and compose-report validation
+ - Added BookExportContext, BookExportResult, ComposedChapter, export_book, resolve_book_export to audioexport.api
++- Added custom AudioCompose and AudioExport root overrides to `export_book()` and `export-book`, matching document export
++- Exposed the verified input compose-report path in book export results
+
+ ### Changed
+
+diff --git a/docs/index.md b/docs/index.md
+index 2b08b92..55b1a1a 100644
+--- a/docs/index.md
++++ b/docs/index.md
+@@ -92,19 +92,15 @@ them, writes metadata and chapters, and verifies the final artifact.
+
+ ## Native `.ssmdbook` export
+
+-Use `export-book` when a composed-book workspace is ready for final M4B assembly. A standard workspace contains `manifest.json`, a `chapters/` directory, and an AudioCompose report at `audiocompose/<variant>/compose-report.toml`; the report identifies composed WAV outputs and the variant that produced them.
++Use `export-book` when a composed-book workspace is ready for final M4B assembly. By default, the workspace contains `manifest.json`, a `chapters/` directory, and an AudioCompose report at `audiocompose/<variant>/compose-report.toml`; the report identifies composed WAV outputs and the variant that produced them. As with `export-document`, `--audiocompose-root` and `--output-root` can select custom stage roots. Each root contains a `<variant>/` directory; the compose report and default export are resolved within that selected variant.
+
+ ```bash
+-audioexport export-book "My Book.ssmdbook" \
+-  --variant "$VARIANT" \
+-  --chapters 5,7,11-13 \
+-  --output exports/book.m4b \
+-  --title "My Book" --author "An Author" --language en-US
++audioexport export-book "My Book.ssmdbook" --variant "$VARIANT" --chapters 5,7,11-13 --audiocompose-root /srv/audio-stages/audiocompose --output-root /srv/audio-exports --title "My Book" --author "An Author" --language en-US
+ ```
+
+ The chapter selector accepts `all` (the default), a source number, an inclusive range, or comma-separated numbers/ranges. Selection is emitted in manifest chapter order. Before assembly, AudioExport verifies the selected report entries, SHA-256 digest, and WAV sample rate, channel count, frame count, and duration; failed, skipped, or missing entries cannot be exported. The report supports both `[[item]]` and legacy `[[items]]` arrays.
+
+-The default output is `audioexport/<variant>/<workspace-name-without-.ssmdbook>.m4b` inside the workspace. `--output` overrides it. Metadata precedence is manifest values, then audiobook-profile values, then explicit CLI/API metadata; audio settings follow defaults, profile settings, then explicit flags. Profile output is used when supplied unless `--output` is explicit. For M4A/M4B, BCP 47 language tags are normalized to ISO 639-2/T track codes (for example, `en-US` to `eng`).
++The default output is `audioexport/<variant>/<workspace-name-without-.ssmdbook>.m4b` inside the workspace; `--output-root` relocates that default to `<output-root>/<variant>/...`. Destination precedence is explicit `--output`, then an audiobook profile's output when defined, then the resolver's default (including `--output-root`). Metadata precedence is manifest values, then audiobook-profile values, then explicit CLI/API metadata; audio settings follow defaults, profile settings, then explicit flags. For M4A/M4B, BCP 47 language tags are normalized to ISO 639-2/T track codes (for example, `en-US` to `eng`).
+
+ Python callers can resolve and inspect the selected, verified chapters before exporting:
+
+@@ -114,32 +110,38 @@ from audioexport import export_book, resolve_book_export
+
+ workspace = Path("My Book.ssmdbook")
+ variant = "my-variant"
+-context = resolve_book_export(workspace, variant=variant, chapters="5,7")
++compose_root = Path("/srv/audio-stages/audiocompose")
++export_root = Path("/srv/audio-exports")
++context = resolve_book_export(
++    workspace,
++    variant=variant,
++    chapters="5,7",
++    audiocompose_root=compose_root,
++    output_root=export_root,
++)
+ print(context.default_output, [chapter.title for chapter in context.chapters])
+
+ result = export_book(
+     workspace,
+     variant=variant,
+     chapters="5,7",
+-    output=Path("exports/book.m4b"),
++    audiocompose_root=compose_root,
++    output_root=export_root,
+ )
+-print(result.output, result.selected_chapter_ids)
++print(result.output, result.input_compose_report, result.selected_chapter_ids)
+ ```
+
+-`BookExportContext`, `BookExportResult`, and `ComposedChapter` describe resolved inputs and export results. This adapter consumes the immediate AudioCompose handoff and does not modify upstream pipeline stages.
++`BookExportContext`, `BookExportResult`, and `ComposedChapter` describe resolved inputs and export results. `BookExportResult.input_compose_report` identifies the exact verified report consumed by the export. This adapter consumes the immediate AudioCompose handoff and does not modify upstream pipeline stages.
+
+ ## Native `.ssmdoc` export
+
+-`export-document` consumes the immediate `audiocompose/<variant>/compose-report.toml` and its verified `document-0001.wav`. It validates the SSMDDoc v1 manifest, exact variant, report status, output path, digest, and WAV geometry, then delegates final output to the generic encoder. Earlier stage directories are not required.
++`export-document` consumes the immediate `audiocompose/<variant>/compose-report.toml` and its verified `document-0001.wav` by default. Like book export, it accepts `--audiocompose-root` and `--output-root` (or the equivalent `audiocompose_root` and `output_root` API arguments) for custom stage roots. It validates the SSMDDoc v1 manifest, exact variant, report status, output path, digest, and WAV geometry, then delegates final output to the generic encoder. Earlier stage directories are not required.
+
+ ```bash
+-audioexport export-document story.ssmdoc \
+-  --variant "$VARIANT" \
+-  --format mp3 \
+-  --title "Story"
++audioexport export-document story.ssmdoc --variant "$VARIANT" --format mp3 --audiocompose-root /srv/audio-stages/audiocompose --output-root /srv/audio-exports --title "Story"
+ ```
+
+-The default output is `audioexport/<variant>/<workspace-name>.<format>` with the standard adjacent AudioExport sidecar. The caller selects the exact variant and a format or output extension; tags, cover art, and a generic timeline are explicit inputs.
++The default output is `audioexport/<variant>/<workspace-name>.<format>` with the standard adjacent AudioExport sidecar; `--output-root` relocates the default to `<output-root>/<variant>/...`. `--output` remains the explicit destination. The caller selects the exact variant and a format or output extension; tags, cover art, and a generic timeline are explicit inputs.
+
+ ```python
+ from audioexport import export_document, resolve_document_export
+diff --git a/tests/test_book.py b/tests/test_book.py
+index 7b91c89..4168bf0 100644
+--- a/tests/test_book.py
++++ b/tests/test_book.py
+@@ -444,3 +444,59 @@ def test_export_book_uses_manifest_defaults_and_deterministic_output(
+         title="Platform Decay", author="Martha Wells", publisher="Example Press", language="en"
+     )
+     assert result.audiobook.reused is True
++
++
++def test_export_book_uses_custom_roots_and_preserves_explicit_output(
++    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    import shutil
++
++    import audioexport.book as book_module
++    from audioexport import export_book
++    from audioexport.audiobook import AudiobookResult
++
++    workspace, _ = _workspace(tmp_path)
++    custom_compose = tmp_path / "external-compose"
++    custom_variant = custom_compose / VARIANT
++    shutil.copytree(workspace / "audiocompose" / VARIANT, custom_variant)
++    shutil.rmtree(workspace / "audiocompose")
++    custom_output = tmp_path / "external-export"
++    captured: list[Path] = []
++
++    def fake_build(inputs: Any, output: Any, **kwargs: Any) -> AudiobookResult:
++        destination = Path(output).absolute()
++        captured.append(destination)
++        return AudiobookResult(
++            destination,
++            "identity",
++            "c" * 64,
++            destination.with_name(destination.name + ".audioexport.json"),
++            False,
++            len(tuple(inputs)),
++            len(tuple(inputs)),
++            300,
++            "aac",
++        )
++
++    monkeypatch.setattr(book_module, "build_audiobook", fake_build)
++    result = export_book(
++        workspace,
++        variant=VARIANT,
++        audiocompose_root=custom_compose,
++        output_root=custom_output,
++    )
++
++    assert result.input_compose_report == custom_variant / "compose-report.toml"
++    assert result.input_compose_report.is_file()
++    assert result.output == (custom_output / VARIANT / "Platform Decay - Martha Wells.m4b")
++
++    explicit_output = tmp_path / "explicit-book.m4b"
++    explicit_result = export_book(
++        workspace,
++        variant=VARIANT,
++        audiocompose_root=custom_compose,
++        output_root=custom_output,
++        output=explicit_output,
++    )
++    assert explicit_result.output == explicit_output
++    assert captured == [result.output, explicit_output]
+diff --git a/tests/test_cli.py b/tests/test_cli.py
+index 6bd0f11..5e3ea95 100644
+--- a/tests/test_cli.py
++++ b/tests/test_cli.py
+@@ -302,6 +302,37 @@ def test_cli_export_book_end_to_end_json_human_reuse_and_force(
+     assert json.loads(forced.stdout)["reused"] is False
+
+
++def test_cli_export_book_forwards_custom_roots_and_reports_provenance(
++    wav: Path, tmp_path: Path, have_tools: None
++) -> None:
++    workspace, variant = _book_fixture(tmp_path, wav)
++    custom_compose = tmp_path / "external-compose"
++    shutil.copytree(workspace / "audiocompose" / variant, custom_compose / variant)
++    shutil.rmtree(workspace / "audiocompose")
++    custom_output = tmp_path / "external-export"
++    compose_report = custom_compose / variant / "compose-report.toml"
++    arguments = (
++        "export-book",
++        str(workspace),
++        "--variant",
++        variant,
++        "--audiocompose-root",
++        str(custom_compose),
++        "--output-root",
++        str(custom_output),
++    )
++
++    completed = _run(*arguments, "--json")
++    assert completed.returncode == 0, completed.stderr
++    result = json.loads(completed.stdout)
++    assert result["input_compose_report"] == str(compose_report)
++    assert result["output"] == str(custom_output / variant / "Platform Decay.m4b")
++
++    human = _run(*arguments)
++    assert human.returncode == 0, human.stderr
++    assert f"input compose report: {compose_report}" in human.stdout
++
++
+ def _document_fixture(tmp_path: Path, wav: Path) -> tuple[Path, str]:
+     variant = "printer-cast--28f616b6fe3b"
+     workspace = tmp_path / "story.ssmdoc"
