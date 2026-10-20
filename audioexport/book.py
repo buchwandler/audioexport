@@ -67,6 +67,7 @@ class BookExportResult:
     output: Path
     sidecar: Path
     audiobook: AudiobookResult
+    input_compose_report: Path | None = None
 
 
 def _fail(message: str, *, code: str = "audioexport.book_invalid") -> InvalidExportError:
@@ -580,12 +581,20 @@ def export_book(
     bitrate: str | int | None = None,
     sample_rate: int | None = None,
     channels: int | None = None,
+    audiocompose_root: str | Path | None = None,
+    output_root: str | Path | None = None,
     force: bool = False,
     ffmpeg: str | Path | None = None,
     ffprobe: str | Path | None = None,
 ) -> BookExportResult:
     """Export selected chapters from a composed variant to a verified M4B."""
-    context = resolve_book_export(book, variant=variant, chapters=chapters)
+    context = resolve_book_export(
+        book,
+        variant=variant,
+        chapters=chapters,
+        audiocompose_root=audiocompose_root,
+        output_root=output_root,
+    )
     audiobook_profile = load_audiobook_profile(profile) if profile is not None else None
     manifest = _read_manifest(context.manifest_path)
     resolved_metadata = _resolved_metadata(manifest, audiobook_profile, metadata)
@@ -637,4 +646,5 @@ def export_book(
         output=audiobook.path,
         sidecar=audiobook.manifest_path,
         audiobook=audiobook,
+        input_compose_report=context.compose_report_path,
     )

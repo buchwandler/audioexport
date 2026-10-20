@@ -6,6 +6,8 @@
 
 - Added verified .ssmdbook-to-M4B export with manifest-ordered chapter selection and compose-report validation
 - Added BookExportContext, BookExportResult, ComposedChapter, export_book, resolve_book_export to audioexport.api
+- Added custom AudioCompose and AudioExport root overrides to `export_book()` and `export-book`, matching document export
+- Exposed the verified input compose-report path in book export results
 
 ### Changed
 

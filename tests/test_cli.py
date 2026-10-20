@@ -302,6 +302,37 @@ def test_cli_export_book_end_to_end_json_human_reuse_and_force(
     assert json.loads(forced.stdout)["reused"] is False
 
 
+def test_cli_export_book_forwards_custom_roots_and_reports_provenance(
+    wav: Path, tmp_path: Path, have_tools: None
+) -> None:
+    workspace, variant = _book_fixture(tmp_path, wav)
+    custom_compose = tmp_path / "external-compose"
+    shutil.copytree(workspace / "audiocompose" / variant, custom_compose / variant)
+    shutil.rmtree(workspace / "audiocompose")
+    custom_output = tmp_path / "external-export"
+    compose_report = custom_compose / variant / "compose-report.toml"
+    arguments = (
+        "export-book",
+        str(workspace),
+        "--variant",
+        variant,
+        "--audiocompose-root",
+        str(custom_compose),
+        "--output-root",
+        str(custom_output),
+    )
+
+    completed = _run(*arguments, "--json")
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["input_compose_report"] == str(compose_report)
+    assert result["output"] == str(custom_output / variant / "Platform Decay.m4b")
+
+    human = _run(*arguments)
+    assert human.returncode == 0, human.stderr
+    assert f"input compose report: {compose_report}" in human.stdout
+
+
 def _document_fixture(tmp_path: Path, wav: Path) -> tuple[Path, str]:
     variant = "printer-cast--28f616b6fe3b"
     workspace = tmp_path / "story.ssmdoc"

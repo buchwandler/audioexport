@@ -114,6 +114,8 @@ def _parser() -> argparse.ArgumentParser:
     export_book_parser.add_argument("--grouping")
     export_book_parser.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
     export_book_parser.add_argument("--cover", type=Path)
+    export_book_parser.add_argument("--audiocompose-root", type=Path)
+    export_book_parser.add_argument("--output-root", type=Path)
     export_book_parser.add_argument("--force", action="store_true")
     export_book_parser.add_argument("--json", action="store_true")
     export_book_parser.add_argument("--ffmpeg")
@@ -316,7 +318,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 force=args.force,
                 ffmpeg=args.ffmpeg,
                 ffprobe=args.ffprobe,
+                audiocompose_root=args.audiocompose_root,
+                output_root=args.output_root,
             )
+            if book_result.input_compose_report is None:
+                raise AudioExportError(
+                    "book export result is missing its verified input compose report",
+                    code="audioexport.error",
+                )
             try:
                 sidecar_payload = json.loads(book_result.sidecar.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
@@ -335,12 +344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "variant": book_result.variant,
                 "selected_chapters": list(book_result.selected_chapter_ids),
                 "selected_chapter_ids": list(book_result.selected_chapter_ids),
-                "input_compose_report": str(
-                    book_result.workspace
-                    / "audiocompose"
-                    / book_result.variant
-                    / "compose-report.toml"
-                ),
+                "input_compose_report": str(book_result.input_compose_report),
                 "output": str(book_result.output),
                 "sidecar": str(book_result.sidecar),
                 "export_identity": book_result.audiobook.export_id,

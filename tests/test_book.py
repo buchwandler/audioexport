@@ -444,3 +444,59 @@ def test_export_book_uses_manifest_defaults_and_deterministic_output(
         title="Platform Decay", author="Martha Wells", publisher="Example Press", language="en"
     )
     assert result.audiobook.reused is True
+
+
+def test_export_book_uses_custom_roots_and_preserves_explicit_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import shutil
+
+    import audioexport.book as book_module
+    from audioexport import export_book
+    from audioexport.audiobook import AudiobookResult
+
+    workspace, _ = _workspace(tmp_path)
+    custom_compose = tmp_path / "external-compose"
+    custom_variant = custom_compose / VARIANT
+    shutil.copytree(workspace / "audiocompose" / VARIANT, custom_variant)
+    shutil.rmtree(workspace / "audiocompose")
+    custom_output = tmp_path / "external-export"
+    captured: list[Path] = []
+
+    def fake_build(inputs: Any, output: Any, **kwargs: Any) -> AudiobookResult:
+        destination = Path(output).absolute()
+        captured.append(destination)
+        return AudiobookResult(
+            destination,
+            "identity",
+            "c" * 64,
+            destination.with_name(destination.name + ".audioexport.json"),
+            False,
+            len(tuple(inputs)),
+            len(tuple(inputs)),
+            300,
+            "aac",
+        )
+
+    monkeypatch.setattr(book_module, "build_audiobook", fake_build)
+    result = export_book(
+        workspace,
+        variant=VARIANT,
+        audiocompose_root=custom_compose,
+        output_root=custom_output,
+    )
+
+    assert result.input_compose_report == custom_variant / "compose-report.toml"
+    assert result.input_compose_report.is_file()
+    assert result.output == (custom_output / VARIANT / "Platform Decay - Martha Wells.m4b")
+
+    explicit_output = tmp_path / "explicit-book.m4b"
+    explicit_result = export_book(
+        workspace,
+        variant=VARIANT,
+        audiocompose_root=custom_compose,
+        output_root=custom_output,
+        output=explicit_output,
+    )
+    assert explicit_result.output == explicit_output
+    assert captured == [result.output, explicit_output]
