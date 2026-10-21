@@ -12,8 +12,7 @@ from typing import Any
 from . import __version__
 from .audiobook import build_audiobook
 from .audiobook_profile import load_audiobook_profile, resolve_profile_overrides
-from .book import export_book
-from .document import export_document
+from .bundle import export_bundle
 from .errors import AudioExportError
 from .fftools import doctor, probe
 from .formats import FORMATS
@@ -87,61 +86,43 @@ def _parser() -> argparse.ArgumentParser:
     audiobook.add_argument("--ffmpeg")
     audiobook.add_argument("--ffprobe")
 
-    export_book_parser = sub.add_parser(
-        "export-book", help="Export a composed .ssmdbook variant as one M4B audiobook"
+    bundle_parser = sub.add_parser("bundle", help="Export an SSMD bundle")
+    bundle_commands = bundle_parser.add_subparsers(dest="bundle_command", required=True)
+    bundle_export = bundle_commands.add_parser(
+        "export", help="Export a composed SSMD bundle variant"
     )
-    export_book_parser.add_argument("book", type=Path)
-    export_book_parser.add_argument("--variant", required=True)
-    export_book_parser.add_argument("--chapters", default="all", metavar="SELECTOR")
-    export_book_parser.add_argument("-o", "--output", type=Path)
-    export_book_parser.add_argument("--profile", type=Path)
-    export_book_parser.add_argument("--bitrate")
-    export_book_parser.add_argument("--sample-rate", type=int)
-    export_book_parser.add_argument("--channels", type=int, choices=(1, 2))
-    export_book_parser.add_argument("--title")
-    export_book_parser.add_argument("--author", "--artist", dest="author")
-    export_book_parser.add_argument("--album")
-    export_book_parser.add_argument("--album-artist")
-    export_book_parser.add_argument("--writer")
-    export_book_parser.add_argument("--genre")
-    export_book_parser.add_argument("--description")
-    export_book_parser.add_argument("--long-description")
-    export_book_parser.add_argument("--comment")
-    export_book_parser.add_argument("--copyright")
-    export_book_parser.add_argument("--encoded-by")
-    export_book_parser.add_argument("--language")
-    export_book_parser.add_argument("--publisher")
-    export_book_parser.add_argument("--grouping")
-    export_book_parser.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
-    export_book_parser.add_argument("--cover", type=Path)
-    export_book_parser.add_argument("--audiocompose-root", type=Path)
-    export_book_parser.add_argument("--output-root", type=Path)
-    export_book_parser.add_argument("--force", action="store_true")
-    export_book_parser.add_argument("--json", action="store_true")
-    export_book_parser.add_argument("--ffmpeg")
-    export_book_parser.add_argument("--ffprobe")
-    export_document_parser = sub.add_parser(
-        "export-document", help="Export a composed .ssmdoc variant to a final audio format"
-    )
-    export_document_parser.add_argument("document", type=Path)
-    export_document_parser.add_argument("--variant", required=True)
-    export_document_parser.add_argument("-o", "--output", type=Path)
-    export_document_parser.add_argument("--format", choices=tuple(FORMATS))
-    export_document_parser.add_argument("--bitrate")
-    export_document_parser.add_argument("--title")
-    export_document_parser.add_argument("--artist")
-    export_document_parser.add_argument("--album")
-    export_document_parser.add_argument(
-        "--metadata", action="append", default=[], metavar="KEY=VALUE"
-    )
-    export_document_parser.add_argument("--cover", type=Path)
-    export_document_parser.add_argument("--timeline", type=Path)
-    export_document_parser.add_argument("--audiocompose-root", type=Path)
-    export_document_parser.add_argument("--output-root", type=Path)
-    export_document_parser.add_argument("--force", action="store_true")
-    export_document_parser.add_argument("--json", action="store_true")
-    export_document_parser.add_argument("--ffmpeg")
-    export_document_parser.add_argument("--ffprobe")
+    bundle_export.add_argument("bundle", type=Path, metavar="BUNDLE")
+    bundle_export.add_argument("--variant", required=True)
+    bundle_export.add_argument("--chapters", default="all", metavar="SELECTOR")
+    bundle_export.add_argument("-o", "--output", type=Path)
+    bundle_export.add_argument("--format", choices=tuple(FORMATS))
+    bundle_export.add_argument("--profile", type=Path)
+    bundle_export.add_argument("--bitrate")
+    bundle_export.add_argument("--sample-rate", type=int)
+    bundle_export.add_argument("--channels", type=int, choices=(1, 2))
+    bundle_export.add_argument("--title")
+    bundle_export.add_argument("--author", "--artist", dest="author")
+    bundle_export.add_argument("--album")
+    bundle_export.add_argument("--album-artist")
+    bundle_export.add_argument("--writer")
+    bundle_export.add_argument("--genre")
+    bundle_export.add_argument("--description")
+    bundle_export.add_argument("--long-description")
+    bundle_export.add_argument("--comment")
+    bundle_export.add_argument("--copyright")
+    bundle_export.add_argument("--encoded-by")
+    bundle_export.add_argument("--language")
+    bundle_export.add_argument("--publisher")
+    bundle_export.add_argument("--grouping")
+    bundle_export.add_argument("--metadata", action="append", default=[], metavar="KEY=VALUE")
+    bundle_export.add_argument("--cover", type=Path)
+    bundle_export.add_argument("--timeline", type=Path)
+    bundle_export.add_argument("--audiocompose-root", type=Path)
+    bundle_export.add_argument("--output-root", type=Path)
+    bundle_export.add_argument("--force", action="store_true")
+    bundle_export.add_argument("--json", action="store_true")
+    bundle_export.add_argument("--ffmpeg")
+    bundle_export.add_argument("--ffprobe")
     inspect = sub.add_parser("inspect", help="Inspect audio and audioexport sidecar")
     inspect.add_argument("input", type=Path)
     inspect.add_argument("--json", action="store_true")
@@ -176,6 +157,32 @@ def _metadata_values(
     return metadata
 
 
+def _bundle_metadata_values(args: argparse.Namespace) -> dict[str, str]:
+    metadata = _metadata_values(
+        args.metadata,
+        title=args.title,
+        artist=args.author,
+        album=args.album,
+    )
+    for field in (
+        "album_artist",
+        "writer",
+        "genre",
+        "description",
+        "long_description",
+        "comment",
+        "copyright",
+        "encoded_by",
+        "language",
+        "publisher",
+        "grouping",
+    ):
+        value = getattr(args, field)
+        if value is not None:
+            metadata[field] = value
+    return metadata
+
+
 def _print(payload: Any, *, as_json: bool) -> None:
     if as_json:
         print(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True))
@@ -183,41 +190,31 @@ def _print(payload: Any, *, as_json: bool) -> None:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
 
 
-def _print_book_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
+def _print_bundle_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
     if as_json:
         _print(payload, as_json=True)
         return
-    print(f"workspace: {payload['workspace']}")
-    print(f"variant: {payload['variant']}")
-    print(f"selected chapters: {', '.join(payload['selected_chapters'])}")
-    print(f"input compose report: {payload['input_compose_report']}")
-    print(f"output: {payload['output']}")
-    print(f"export identity: {payload['export_identity']}")
-    print(f"duration: {payload['duration_seconds']:.3f} s")
-    print(
-        "codec/sample-rate/channels: "
-        f"{payload['codec']}/{payload['sample_rate']} Hz/{payload['channels']}"
-    )
-    print(f"reused: {'yes' if payload['reused'] else 'no'}")
-
-
-def _print_document_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
-    if as_json:
-        _print(payload, as_json=True)
-        return
-    print(f"workspace: {payload['workspace']}")
-    print(f"variant: {payload['variant']}")
-    print(f"document: {payload['document_id']}")
-    print(f"input compose report: {payload['input_compose_report']}")
-    print(f"source: {payload['source']}")
-    print(f"output: {payload['output']}")
-    print(f"export identity: {payload['export_identity']}")
-    print(f"duration: {payload['duration_ms'] / 1000:.3f} s")
-    print(
-        "codec/sample-rate/channels: "
-        f"{payload['codec']}/{payload['sample_rate']} Hz/{payload['channels']}"
-    )
-    print(f"reused: {'yes' if payload['reused'] else 'no'}")
+    result = payload["result"]
+    kind = payload["kind"]
+    print("AudioExport bundle export")
+    print(f"kind: {kind}")
+    print(f"workspace: {result['workspace']}")
+    print(f"variant: {result['variant']}")
+    if kind == "book":
+        selected = result.get("selected_chapter_ids", [])
+        print(f"selected chapters: {len(selected)}")
+    else:
+        print(f"document: {result['document_id']}")
+    if result.get("input_compose_report") is not None:
+        print(f"input compose report: {result['input_compose_report']}")
+    if result.get("source") is not None:
+        print(f"source: {result['source']}")
+    print(f"output: {result['output']}")
+    if result.get("codec") is not None:
+        print(f"codec: {result['codec']}")
+    if isinstance(result.get("duration_ms"), (int, float)):
+        print(f"duration: {result['duration_ms'] / 1000:.3f} s")
+    print(f"reused: {'yes' if result['reused'] else 'no'}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -274,102 +271,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _print([item.to_dict() for item in results], as_json=args.json)
             return 0
-        if args.command == "export-book":
-            book_metadata_values: dict[str, str] = {}
-            for item in args.metadata:
-                if "=" not in item:
-                    raise AudioExportError(
-                        "--metadata requires KEY=VALUE",
-                        code="audioexport.audiobook_metadata_invalid",
-                    )
-                key, value = item.split("=", 1)
-                book_metadata_values[key] = value
-            for field in (
-                "title",
-                "author",
-                "album",
-                "album_artist",
-                "writer",
-                "genre",
-                "description",
-                "long_description",
-                "comment",
-                "copyright",
-                "encoded_by",
-                "language",
-                "publisher",
-                "grouping",
-            ):
-                value = getattr(args, field)
-                if value is not None:
-                    book_metadata_values[field] = value
-
-            book_result = export_book(
-                args.book,
+        if args.command == "bundle" and args.bundle_command == "export":
+            bundle_result = export_bundle(
+                args.bundle,
                 variant=args.variant,
                 chapters=args.chapters,
                 output=args.output,
+                format=args.format,
                 profile=args.profile,
-                metadata=book_metadata_values,
-                cover=args.cover,
                 bitrate=args.bitrate,
                 sample_rate=args.sample_rate,
                 channels=args.channels,
-                force=args.force,
-                ffmpeg=args.ffmpeg,
-                ffprobe=args.ffprobe,
-                audiocompose_root=args.audiocompose_root,
-                output_root=args.output_root,
-            )
-            if book_result.input_compose_report is None:
-                raise AudioExportError(
-                    "book export result is missing its verified input compose report",
-                    code="audioexport.error",
-                )
-            try:
-                sidecar_payload = json.loads(book_result.sidecar.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise AudioExportError(
-                    f"could not read audiobook verification sidecar: {exc}",
-                    code="audioexport.audiobook_manifest_invalid",
-                ) from exc
-            verified = (
-                sidecar_payload.get("verified", {}) if isinstance(sidecar_payload, Mapping) else {}
-            )
-            if not isinstance(verified, Mapping):
-                verified = {}
-            duration_ms = book_result.audiobook.duration_ms
-            payload = {
-                "workspace": str(book_result.workspace),
-                "variant": book_result.variant,
-                "selected_chapters": list(book_result.selected_chapter_ids),
-                "selected_chapter_ids": list(book_result.selected_chapter_ids),
-                "input_compose_report": str(book_result.input_compose_report),
-                "output": str(book_result.output),
-                "sidecar": str(book_result.sidecar),
-                "export_identity": book_result.audiobook.export_id,
-                "duration_ms": duration_ms,
-                "duration_seconds": duration_ms / 1000,
-                "codec": book_result.audiobook.codec,
-                "sample_rate": verified.get("sample_rate"),
-                "channels": verified.get("channels"),
-                "reused": book_result.audiobook.reused,
-            }
-            _print_book_export(payload, as_json=args.json)
-            return 0
-        if args.command == "export-document":
-            document_result = export_document(
-                args.document,
-                variant=args.variant,
-                output=args.output,
-                format=args.format,
-                bitrate=args.bitrate,
-                metadata=_metadata_values(
-                    args.metadata,
-                    title=args.title,
-                    artist=args.artist,
-                    album=args.album,
-                ),
+                metadata=_bundle_metadata_values(args),
                 cover=args.cover,
                 timeline=args.timeline,
                 audiocompose_root=args.audiocompose_root,
@@ -378,7 +291,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ffmpeg=args.ffmpeg,
                 ffprobe=args.ffprobe,
             )
-            _print_document_export(document_result.to_dict(), as_json=args.json)
+            _print_bundle_export(bundle_result.to_dict(), as_json=args.json)
             return 0
         if args.command == "audiobook":
             metadata_values: dict[str, str] = {}

@@ -116,59 +116,41 @@ mode = "explicit"       # tracks | explicit | none
 
 Run it with `audioexport audiobook --profile audiobook.toml`. CLI `--output`, metadata, audio settings, cover, and `--chapters-file` override profile values; the TOML input order remains authoritative. `mode = "tracks"` (the default) creates one chapter per track; `mode = "explicit"` requires `chapters_file`; `mode = "none"` disables chapters. Existing `encode(..., format="m4b", timeline=...)` remains the right choice for one prepared source with caller-supplied chapters.
 
-## Native `.ssmdbook` pipeline
+## SSMD bundle export
 
-Use `export-book` when AudioCompose has already written a variant in a standard `.ssmdbook` workspace. It is the native book-workspace adapter; `audioexport audiobook` remains the generic standalone track/directory assembler, and `encode` remains for one prepared source with a timeline.
+Book and single-document workspaces share one canonical editable directory root, `<name>.ssmd-bundle/`. The manifest selects the export path: `format = "ssmdconvert.book"` uses verified audiobook assembly, while `format = "ssmdconvert.document"` uses verified one-document encoding; both manifest schemas remain at version 1. AudioExport accepts only the bundle root, not an internal chapter directory, the document source file, or a ZIP archive.
 
-```bash
-audiocompose compose-book . --variant "$VARIANT"
-audioexport export-book . --variant "$VARIANT"
-```
-
-`export-book` reads `manifest.json` and `audiocompose/<variant>/compose-report.toml`, accepts singular `[[item]]` or plural `[[items]]` report tables, validates selected entries and WAV checksums/geometry with bare or `sha256:`-prefixed digests, then delegates final M4B assembly and verification to AudioExport. It does not run AudioCompose, repair or synthesize chapters. Chapter selection accepts `all` (the default), a source number, an inclusive range, or comma-separated source numbers/ranges, for example `--chapters 5,7,11-13`. Selection follows manifest chapter order.
-
-For M4A/M4B, language metadata is written on the audio track using ISO 639-2/T. BCP 47 tags such as `en-US` are normalized to their three-letter track code (`eng`).
-
-By default, output is written to `audioexport/<variant>/<workspace-name-without-.ssmdbook>.m4b` in the workspace. `--output` may override this; when an audiobook profile is supplied, its output is used unless `--output` is specified.
-
-Metadata precedence is **manifest metadata < audiobook profile metadata < explicit CLI/API metadata**. Audio settings use **AudioExport defaults < audiobook profile < explicit CLI/API flags**. Thus explicit metadata fields replace matching profile/manifest values, profile values replace manifest defaults, and unset values continue to fall through. Explicit cover and audio flags override corresponding profile settings. The profile's inputs and chapter configuration do not replace the variant chapters selected from the compose report.
-
-## Native `.ssmdoc` export
-
-Use `export-document` after AudioCompose has produced a document variant. AudioExport reads only the direct AudioCompose handoff, verifies its report, WAV digest, and geometry, then delegates final encoding to the generic pipeline:
+Use the same command for either kind:
 
 ```bash
-audiocompose compose-document story.ssmdoc --variant "$VARIANT"
-audioexport export-document story.ssmdoc \
-  --variant "$VARIANT" \
-  --format mp3 \
-  --title "Story" --artist "An Author"
+audiocompose bundle compose "My Book.ssmd-bundle" --variant "$VARIANT"
+audioexport bundle export "My Book.ssmd-bundle" --variant "$VARIANT" \
+  --chapters 5,7,11-13 --audiocompose-root /srv/audio-stages/audiocompose \
+  --output-root /srv/audio-exports --title "My Book" --author "An Author" \
+  --language en-US
+
+audioexport bundle export story.ssmd-bundle --variant "$VARIANT" \
+  --output story.m4a --title "Story" --artist "An Author"
 ```
 
-The input is `audiocompose/<variant>/compose-report.toml` and its verified `document-0001.wav`. By default, output and the adjacent `.audioexport.json` sidecar go to `audioexport/<variant>/<workspace-name>.<format>` (for example, `audioexport/<variant>/story.mp3`). The exact variant and output format are explicit; an output filename extension can supply the format instead. Metadata, cover art, and a generic chapter timeline are caller-supplied; document headings and manifest fields are not inferred as tags or chapters.
+AudioExport verifies the selected AudioCompose report, output paths, WAV checksums, and audio geometry before exporting. For a book, `--chapters` selects manifest chapters (`all` by default), output defaults to M4B, `--format` accepts only `m4b`, and audiobook profiles remain supported. For a document, only `--chapters all` is valid; `--format` or the output filename extension selects the final format, and `--timeline` supplies an optional generic chapter timeline. `--author` and `--artist` are aliases for the appropriate author/artist metadata field. Kind-specific options that have no meaning for the selected manifest are rejected rather than ignored.
 
-Python callers can separate read-only verification from encoding:
+Default output names strip only `.ssmd-bundle`: books use `audioexport/<variant>/<name>.m4b`, while documents use `audioexport/<variant>/<name>.<format>`. `--output-root` relocates these defaults; `--output` selects an explicit destination. Book metadata precedence is manifest, then audiobook profile, then explicit CLI/API values. BCP 47 language tags such as `en-US` are normalized to ISO 639-2/T track codes such as `eng` for M4A/M4B.
+
+The JSON result uses one versioned envelope with `format: "audioexport-bundle-result"`, `version: 1`, `kind`, and a kind-specific `result` object. Human output begins with `AudioExport bundle export` and reports the selected kind, workspace, variant, and output.
+
+Python callers use the same manifest-dispatched facade:
 
 ```python
-from audioexport import export_document, resolve_document_export
+from audioexport import export_bundle
 
-context = resolve_document_export("story.ssmdoc", variant=variant)
-print(context.document.sha256)
-result = export_document(
-    "story.ssmdoc",
-    variant=variant,
-    format="mp3",
-    metadata={"title": "Story", "artist": "An Author"},
-)
-print(result.output, result.export.reused)
+book_result = export_bundle("My Book.ssmd-bundle", variant=variant, chapters="5,7")
+document_result = export_bundle("story.ssmd-bundle", variant=variant, format="mp3")
+print(book_result.kind, book_result.output)
+print(document_result.kind, document_result.output)
 ```
 
-AudioExport does not run AudioCompose, synthesize audio, or inspect earlier pipeline stages. It has no runtime dependency on planning, synthesis, or composition packages.
-
-If `--output` is not set for `encode`, the output filename defaults to the input stem and chosen format. To avoid destroying the input, encoding input and output to the same real path is always rejected.
-
-Without `--force`, an untracked, symlink, or manually modified output is never overwritten. A previously generated output is updated when its sidecar and checksum still match; re-running identical options returns `reused: true` without re-encoding. `--force` authorizes replacing an unknown or modified regular file, but symlink outputs and sidecars are always rejected. Writes are staged with their manifest; a failed manifest commit restores the last good pair when possible, and an incomplete recovery reports the preserved backup path. A per-target process lock rejects concurrent writers with `audioexport.output_busy`; remove a stale lock only after confirming no writer is active.
-
+`BundleExportResult.value` contains the specialized book or document result; `BundleExportResult.output` gives the final artifact path. The facade is available from both `audioexport` and `audioexport.api`.
 OGG defaults to Vorbis quality-based encoding (`-qscale:a 4`) to avoid low-rate/mono bitrate incompatibilities. `--bitrate` accepts values such as `192k`, `192000`, or `1M`; whitespace is trimmed. A bare integer is interpreted as **bits per second**, so use `192k` (or `192000`), not `192`, for a nominal 192 kb/s rate. WAV/FLAC don't accept bitrate. WAV output is always PCM16 conversion, not a byte-for-byte passthrough; lossy codecs and even PCM output can vary with FFmpeg versions, which are included in the export identity.
 
 ## Python API
@@ -202,7 +184,7 @@ print(probe("exported/book.m4b")["chapters"])
 
 You may import the same public functions from `audioexport.api` as well as from `audioexport`.
 
-The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult`; `build_audiobook()` returns an `AudiobookResult`; `export_book()` and `resolve_book_export()` provide verified composed-book export. `resolve_document_export()` performs read-only SSMDDoc verification, while `export_document()` verifies and encodes through `ComposedDocument`, `DocumentExportContext`, and `DocumentExportResult`. These symbols are available from both `audioexport` and `audioexport.api`.
+The public errors are `AudioExportError` and subclasses `InvalidExportError`, `ToolNotFoundError`, `EncodingError`, and `VerificationError`, with a stable machine-readable `.code` value. `encode()` returns an immutable `ExportResult`; `build_audiobook()` returns an `AudiobookResult`; `export_bundle()` provides one manifest-dispatched entry point for verified book and document bundles and returns `BundleExportResult`. The facade and result types are available from both `audioexport` and `audioexport.api`.
 
 ## Export profile
 

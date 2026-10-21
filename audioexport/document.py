@@ -1,4 +1,4 @@
-"""Secure adapter from a composed ``.ssmdoc`` workspace to audio export."""
+"""Secure adapter from a composed SSMD bundle workspace to audio export."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from ._workspace import (
     sha256_file,
     verify_reported_wav,
 )
+from .bundle_contract import bundle_stem, load_bundle_identity
 from .errors import InvalidExportError, VerificationError
 from .formats import FORMATS, normalize_format
 from .pipeline import ExportResult, encode
@@ -129,36 +130,13 @@ def _duplicate_checked_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _workspace_for_document(document: str | Path) -> Path:
-    if not isinstance(document, (str, Path)):
-        raise _fail("document must be a path", code="audioexport.document_workspace_invalid")
-    candidate = Path(document).expanduser()
-    if candidate.is_symlink():
+    identity = load_bundle_identity(document)
+    if identity.kind != "document":
         raise _fail(
-            f"document workspace/source must not be a symlink: {candidate}",
+            "document export requires a bundle with format 'ssmdconvert.document'",
             code="audioexport.document_workspace_invalid",
         )
-    try:
-        resolved = candidate.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise _fail(
-            f"document path does not exist or cannot be resolved: {candidate}",
-            code="audioexport.document_workspace_invalid",
-        ) from exc
-    if not candidate.is_symlink() and resolved.is_dir():
-        workspace = resolved
-    elif candidate.name == "document.ssmd.md" and resolved.is_file():
-        workspace = resolved.parent
-    else:
-        raise _fail(
-            "document must be an SSMDDoc workspace or its canonical document.ssmd.md file",
-            code="audioexport.document_workspace_invalid",
-        )
-    if candidate.is_dir() and candidate.is_symlink():
-        raise _fail(
-            f"document workspace must not be a symlink: {candidate}",
-            code="audioexport.document_workspace_invalid",
-        )
-    return workspace
+    return identity.root
 
 
 def _read_manifest(path: Path) -> Mapping[str, Any]:
@@ -397,11 +375,7 @@ def resolve_document_export(
     )
     if not selected_output_root.is_absolute():
         selected_output_root = Path.cwd() / selected_output_root
-    name = workspace.name
-    if name.casefold().endswith(".ssmdoc"):
-        name = name[: -len(".ssmdoc")]
-    if not name:
-        name = "document"
+    name = bundle_stem(workspace, fallback="document")
     return DocumentExportContext(
         workspace=workspace,
         variant=safe,

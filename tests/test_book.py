@@ -48,7 +48,7 @@ def _report_text(
 
 
 def _workspace(tmp_path: Path) -> tuple[Path, list[dict[str, Any]]]:
-    workspace = tmp_path / "Platform Decay - Martha Wells.ssmdbook"
+    workspace = tmp_path / "Platform Decay - Martha Wells.ssmd-bundle"
     (workspace / "chapters").mkdir(parents=True)
     variant_dir = workspace / "audiocompose" / VARIANT
     variant_dir.mkdir(parents=True)
@@ -60,6 +60,8 @@ def _workspace(tmp_path: Path) -> tuple[Path, list[dict[str, Any]]]:
     (workspace / "manifest.json").write_text(
         json.dumps(
             {
+                "format": "ssmdconvert.book",
+                "schema_version": 1,
                 "metadata": {
                     "title": "Platform Decay",
                     "authors": ["Martha Wells"],
@@ -128,10 +130,12 @@ def test_rejects_ambiguous_compose_item_tables(tmp_path: Path) -> None:
         resolve_book_export(workspace, variant=VARIANT)
 
 
-def test_resolves_workspace_and_preserves_manifest_order(tmp_path: Path) -> None:
+def test_resolves_bundle_root_and_preserves_manifest_order(tmp_path: Path) -> None:
     workspace, _ = _workspace(tmp_path)
 
-    result = resolve_book_export(workspace / "chapters", variant=VARIANT)
+    with pytest.raises(InvalidExportError, match="canonical .ssmd-bundle directory root"):
+        resolve_book_export(workspace / "chapters", variant=VARIANT)
+    result = resolve_book_export(workspace, variant=VARIANT)
 
     assert result.workspace == workspace
     assert [chapter.id for chapter in result.chapters] == [

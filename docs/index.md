@@ -90,67 +90,38 @@ chapter boundaries, or provide an `audioexport.audiobook.v1` profile for a
 repeatable assembly. The audiobook workflow normalizes tracks, concatenates
 them, writes metadata and chapters, and verifies the final artifact.
 
-## Native `.ssmdbook` export
+## SSMD bundle export
 
-Use `export-book` when a composed-book workspace is ready for final M4B assembly. By default, the workspace contains `manifest.json`, a `chapters/` directory, and an AudioCompose report at `audiocompose/<variant>/compose-report.toml`; the report identifies composed WAV outputs and the variant that produced them. As with `export-document`, `--audiocompose-root` and `--output-root` can select custom stage roots. Each root contains a `<variant>/` directory; the compose report and default export are resolved within that selected variant.
-
-```bash
-audioexport export-book "My Book.ssmdbook" --variant "$VARIANT" --chapters 5,7,11-13 --audiocompose-root /srv/audio-stages/audiocompose --output-root /srv/audio-exports --title "My Book" --author "An Author" --language en-US
-```
-
-The chapter selector accepts `all` (the default), a source number, an inclusive range, or comma-separated numbers/ranges. Selection is emitted in manifest chapter order. Before assembly, AudioExport verifies the selected report entries, SHA-256 digest, and WAV sample rate, channel count, frame count, and duration; failed, skipped, or missing entries cannot be exported. The report supports both `[[item]]` and legacy `[[items]]` arrays.
-
-The default output is `audioexport/<variant>/<workspace-name-without-.ssmdbook>.m4b` inside the workspace; `--output-root` relocates that default to `<output-root>/<variant>/...`. Destination precedence is explicit `--output`, then an audiobook profile's output when defined, then the resolver's default (including `--output-root`). Metadata precedence is manifest values, then audiobook-profile values, then explicit CLI/API metadata; audio settings follow defaults, profile settings, then explicit flags. For M4A/M4B, BCP 47 language tags are normalized to ISO 639-2/T track codes (for example, `en-US` to `eng`).
-
-Python callers can resolve and inspect the selected, verified chapters before exporting:
-
-```python
-from pathlib import Path
-from audioexport import export_book, resolve_book_export
-
-workspace = Path("My Book.ssmdbook")
-variant = "my-variant"
-compose_root = Path("/srv/audio-stages/audiocompose")
-export_root = Path("/srv/audio-exports")
-context = resolve_book_export(
-    workspace,
-    variant=variant,
-    chapters="5,7",
-    audiocompose_root=compose_root,
-    output_root=export_root,
-)
-print(context.default_output, [chapter.title for chapter in context.chapters])
-
-result = export_book(
-    workspace,
-    variant=variant,
-    chapters="5,7",
-    audiocompose_root=compose_root,
-    output_root=export_root,
-)
-print(result.output, result.input_compose_report, result.selected_chapter_ids)
-```
-
-`BookExportContext`, `BookExportResult`, and `ComposedChapter` describe resolved inputs and export results. `BookExportResult.input_compose_report` identifies the exact verified report consumed by the export. This adapter consumes the immediate AudioCompose handoff and does not modify upstream pipeline stages.
-
-## Native `.ssmdoc` export
-
-`export-document` consumes the immediate `audiocompose/<variant>/compose-report.toml` and its verified `document-0001.wav` by default. Like book export, it accepts `--audiocompose-root` and `--output-root` (or the equivalent `audiocompose_root` and `output_root` API arguments) for custom stage roots. It validates the SSMDDoc v1 manifest, exact variant, report status, output path, digest, and WAV geometry, then delegates final output to the generic encoder. Earlier stage directories are not required.
+Book and single-document workspaces share the canonical editable root `<name>.ssmd-bundle/`. The authoritative manifest `format` (`ssmdconvert.book` or `ssmdconvert.document`) selects the implementation; both schemas remain at version 1. Commands accept only the bundle root directory, not internal component paths or ZIP files.
 
 ```bash
-audioexport export-document story.ssmdoc --variant "$VARIANT" --format mp3 --audiocompose-root /srv/audio-stages/audiocompose --output-root /srv/audio-exports --title "Story"
+audiocompose bundle compose "My Book.ssmd-bundle" --variant "$VARIANT"
+audioexport bundle export "My Book.ssmd-bundle" --variant "$VARIANT" \
+  --chapters 5,7,11-13 --audiocompose-root /srv/audio-stages/audiocompose \
+  --output-root /srv/audio-exports --title "My Book" --author "An Author"
+
+audioexport bundle export story.ssmd-bundle --variant "$VARIANT" \
+  --output story.m4a --title "Story" --artist "An Author"
 ```
 
-The default output is `audioexport/<variant>/<workspace-name>.<format>` with the standard adjacent AudioExport sidecar; `--output-root` relocates the default to `<output-root>/<variant>/...`. `--output` remains the explicit destination. The caller selects the exact variant and a format or output extension; tags, cover art, and a generic timeline are explicit inputs.
+AudioExport verifies the selected compose report, output paths, WAV digests, and audio geometry before export. Books use verified M4B assembly, support chapter selection and audiobook profiles, and accept only `--format m4b`. Documents support only `--chapters all`; `--format` or the output filename extension selects the final format, and `--timeline` supplies an optional generic chapter timeline. `--author` and `--artist` are aliases for the appropriate metadata field. Options unsupported for the detected kind fail explicitly.
+
+Default output stems strip `.ssmd-bundle`: book output is `audioexport/<variant>/<name>.m4b`, and document output is `audioexport/<variant>/<name>.<format>`. `--output-root` relocates these defaults and `--output` selects an explicit path. Book metadata precedence remains manifest, audiobook profile, then explicit API/CLI values. BCP 47 language tags such as `en-US` normalize to ISO 639-2/T track codes such as `eng` for M4A/M4B.
+
+JSON output has one versioned envelope: `format: "audioexport-bundle-result"`, `version: 1`, `kind`, and kind-specific `result`. Human output begins with `AudioExport bundle export` and includes kind, workspace, variant, output, and the selected chapter count or composed document item.
+
+Python callers use the same facade:
 
 ```python
-from audioexport import export_document, resolve_document_export
+from audioexport import export_bundle
 
-context = resolve_document_export("story.ssmdoc", variant=variant)  # read-only
-result = export_document("story.ssmdoc", variant=variant, format="mp3")
+book_result = export_bundle("My Book.ssmd-bundle", variant=variant, chapters="5,7")
+document_result = export_bundle("story.ssmd-bundle", variant=variant, format="mp3")
+print(book_result.kind, book_result.output)
+print(document_result.kind, document_result.output)
 ```
 
-## Python API
+`BundleExportResult.value` holds the specialized export result. The facade is available from both `audioexport` and `audioexport.api`.
 
 The public API is available from both `audioexport` and `audioexport.api`:
 
@@ -178,8 +149,8 @@ Important public entry points include:
 - `encode()` for one prepared source
 - `run_profile()` for multiple configured outputs
 - `build_audiobook()` for ordered-track assembly
-- `export_book()` and `resolve_book_export()` for verified composed-book export; `BookExportContext`, `BookExportResult`, and `ComposedChapter` describe its public results
-- `export_document()` and `resolve_document_export()` for verified composed-document export; `ComposedDocument`, `DocumentExportContext`, and `DocumentExportResult` describe its inputs and results
+- `export_bundle()` for verified book or document bundle export; `BundleExportResult` exposes the detected kind, specialized result, and output path
+- `BundleIdentity` and the `audioexport.bundle_contract` loader for safe canonical-root and manifest-kind validation
 - `preflight_profile()` for read-only profile validation
 - `doctor()` and `probe()` for tool and artifact diagnostics
 - `load_profile()` and `load_audiobook_profile()` for TOML profiles

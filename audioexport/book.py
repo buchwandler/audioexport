@@ -1,4 +1,4 @@
-"""Safe adapter from a composed ``.ssmdbook`` workspace to audiobook export.
+"""Safe adapter from a composed SSMD bundle workspace to audiobook export.
 
 The AudioCompose report is treated as a filesystem hand-off contract. AudioExport
 validates selected WAV files and then delegates assembly to ``build_audiobook``.
@@ -22,6 +22,7 @@ else:  # pragma: no cover - Python 3.10
 from . import _workspace
 from .audiobook import AudiobookResult, AudiobookTrack, build_audiobook
 from .audiobook_profile import AudiobookProfile, load_audiobook_profile
+from .bundle_contract import bundle_stem, load_bundle_identity
 from .errors import InvalidExportError, VerificationError
 from .metadata import AudiobookMetadata, audiobook_tags
 
@@ -192,37 +193,19 @@ def _safe_variant(variant: str) -> str:
 
 
 def _workspace_for(book: str | Path) -> Path:
-    if not isinstance(book, (str, Path)):
-        raise _fail("book must be a path", code="audioexport.book_workspace_invalid")
-    candidate = Path(book).expanduser()
-    try:
-        resolved = candidate.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
+    identity = load_bundle_identity(book)
+    if identity.kind != "book":
         raise _fail(
-            f"book path does not exist or cannot be resolved: {candidate}",
+            "book export requires a bundle with format 'ssmdconvert.book'",
             code="audioexport.book_workspace_invalid",
-        ) from exc
-    start = resolved if resolved.is_dir() else resolved.parent
-    for directory in (start, *start.parents):
-        manifest = directory / "manifest.json"
-        chapters = directory / "chapters"
-        if manifest.exists() or chapters.exists():
-            if (
-                directory.is_dir()
-                and not chapters.is_symlink()
-                and chapters.is_dir()
-                and not manifest.is_symlink()
-                and manifest.is_file()
-            ):
-                return directory
-            raise _fail(
-                f"invalid .ssmdbook workspace at {directory}: expected manifest.json and chapters/",
-                code="audioexport.book_workspace_invalid",
-            )
-    raise _fail(
-        f"could not find a .ssmdbook workspace containing manifest.json and chapters/ from {candidate}",
-        code="audioexport.book_workspace_invalid",
-    )
+        )
+    chapters = identity.root / "chapters"
+    if chapters.is_symlink() or not chapters.is_dir():
+        raise _fail(
+            f"book bundle is invalid at {identity.root}: expected chapters/",
+            code="audioexport.book_workspace_invalid",
+        )
+    return identity.root
 
 
 def _report_root(workspace: Path, audiocompose_root: str | Path | None) -> Path:
@@ -386,7 +369,7 @@ def resolve_book_export(
     audiocompose_root: str | Path | None = None,
     output_root: str | Path | None = None,
 ) -> BookExportContext:
-    """Resolve and verify selected composed chapters from a ``.ssmdbook`` workspace.
+    """Resolve and verify selected composed chapters from a SSMD bundle workspace.
 
     Reported WAV duration is compared with frame-derived duration using a fixed
     0.01-second tolerance to account for decimal serialization precision.
@@ -483,11 +466,7 @@ def resolve_book_export(
                 manifest_id=str(item["manifest_id"]),
             )
         )
-    name = workspace.name
-    if name.casefold().endswith(".ssmdbook"):
-        name = name[: -len(".ssmdbook")]
-    if not name:
-        name = "book"
+    name = bundle_stem(workspace, fallback="book")
     base_output = (
         Path(output_root).expanduser() if output_root is not None else workspace / "audioexport"
     )

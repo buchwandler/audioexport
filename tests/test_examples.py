@@ -30,9 +30,9 @@ def test_audiobook_example_profile_and_chapters_are_valid(tmp_path: Path) -> Non
     assert [(chapter.title, chapter.start_ms) for chapter in chapters] == [("Opening", 0)]
 
 
-def test_ssmdbook_generator_creates_a_resolvable_verified_workspace(tmp_path: Path) -> None:
-    workspace = tmp_path / "AudioExport Demo.ssmdbook"
-    script = EXAMPLES / "create_ssmdbook_demo.py"
+def test_bundle_generator_creates_a_resolvable_verified_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "AudioExport Demo.ssmd-bundle"
+    script = EXAMPLES / "create_ssmd_bundle_demo.py"
     subprocess.run([sys.executable, str(script), str(workspace)], check=True, capture_output=True)
 
     context = resolve_book_export(workspace, variant="demo-variant")

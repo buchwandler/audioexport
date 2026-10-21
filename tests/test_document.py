@@ -30,7 +30,7 @@ def _write_wav(
 
 
 def _workspace(tmp_path: Path) -> tuple[Path, Path, dict[str, Any]]:
-    workspace = tmp_path / "story.ssmdoc"
+    workspace = tmp_path / "story.ssmd-bundle"
     workspace.mkdir(parents=True)
     (workspace / "manifest.json").write_text(
         json.dumps(
@@ -91,13 +91,15 @@ def _assert_code(call: Any, expected: str) -> None:
     assert error.value.code == expected
 
 
-def test_resolves_workspace_and_canonical_source_without_creating_output(tmp_path: Path) -> None:
+def test_resolves_bundle_root_without_creating_output(tmp_path: Path) -> None:
     workspace, wav_path, _ = _workspace(tmp_path)
 
     context = resolve_document_export(workspace, variant=VARIANT)
-    from_source = resolve_document_export(workspace / "document.ssmd.md", variant=VARIANT)
+    _assert_code(
+        lambda: resolve_document_export(workspace / "document.ssmd.md", variant=VARIANT),
+        "audioexport.bundle_invalid",
+    )
 
-    assert context == from_source
     assert context.workspace == workspace
     assert context.document.id == DOCUMENT_ID
     assert context.document.path == wav_path
@@ -198,7 +200,14 @@ def test_rejects_invalid_manifest_contract(tmp_path: Path, manifest: dict[str, A
     workspace, _, _ = _workspace(tmp_path)
     (workspace / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
-    _assert_code(lambda: _resolve(workspace), "audioexport.document_manifest_invalid")
+    expected = (
+        "audioexport.bundle_invalid"
+        if manifest.get("format") != "ssmdconvert.document"
+        or isinstance(manifest.get("schema_version"), bool)
+        or manifest.get("schema_version") != 1
+        else "audioexport.document_manifest_invalid"
+    )
+    _assert_code(lambda: _resolve(workspace), expected)
 
 
 def test_rejects_duplicate_manifest_keys(tmp_path: Path) -> None:
@@ -210,13 +219,13 @@ def test_rejects_duplicate_manifest_keys(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    _assert_code(lambda: _resolve(workspace), "audioexport.document_manifest_invalid")
+    _assert_code(lambda: _resolve(workspace), "audioexport.bundle_invalid")
 
 
 def test_rejects_missing_or_symlinked_manifest_and_source(tmp_path: Path) -> None:
     workspace, _, _ = _workspace(tmp_path / "missing-manifest")
     (workspace / "manifest.json").unlink()
-    _assert_code(lambda: _resolve(workspace), "audioexport.document_manifest_invalid")
+    _assert_code(lambda: _resolve(workspace), "audioexport.bundle_invalid")
 
     workspace, _, _ = _workspace(tmp_path / "symlink-manifest")
     manifest = workspace / "manifest.json"
@@ -224,7 +233,7 @@ def test_rejects_missing_or_symlinked_manifest_and_source(tmp_path: Path) -> Non
     saved_manifest.write_bytes(manifest.read_bytes())
     manifest.unlink()
     manifest.symlink_to(saved_manifest)
-    _assert_code(lambda: _resolve(workspace), "audioexport.document_manifest_invalid")
+    _assert_code(lambda: _resolve(workspace), "audioexport.bundle_invalid")
 
     workspace, _, _ = _workspace(tmp_path / "symlink-source")
     source = workspace / "document.ssmd.md"
@@ -249,11 +258,11 @@ def test_rejects_unrecognized_workspace_input_and_zip(tmp_path: Path) -> None:
 
     _assert_code(
         lambda: resolve_document_export(arbitrary, variant=VARIANT),
-        "audioexport.document_workspace_invalid",
+        "audioexport.bundle_invalid",
     )
     _assert_code(
         lambda: resolve_document_export(archive, variant=VARIANT),
-        "audioexport.document_workspace_invalid",
+        "audioexport.bundle_invalid",
     )
 
 

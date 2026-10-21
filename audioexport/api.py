@@ -11,6 +11,7 @@ from .book import (
     export_book,
     resolve_book_export,
 )
+from .bundle import BundleExportResult, export_bundle
 from .chapters import Chapter, load_chapters
 from .document import (
     ComposedDocument,
@@ -43,6 +44,7 @@ __all__ = [
     "AudiobookTrack",
     "BookExportContext",
     "BookExportResult",
+    "BundleExportResult",
     "Chapter",
     "ComposedChapter",
     "ComposedDocument",
@@ -60,6 +62,7 @@ __all__ = [
     "doctor",
     "encode",
     "export_book",
+    "export_bundle",
     "export_document",
     "load_audiobook_profile",
     "load_chapters",

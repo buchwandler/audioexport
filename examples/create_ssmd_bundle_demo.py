@@ -1,4 +1,4 @@
-"""Generate a tiny, checksum-valid composed-book workspace for export-book."""
+"""Generate a tiny, checksum-valid composed-book workspace for bundle export."""
 
 from __future__ import annotations
 
@@ -30,6 +30,8 @@ def create_demo_workspace(destination: Path) -> Path:
 
     digest = hashlib.sha256(wav_path.read_bytes()).hexdigest()
     manifest = {
+        "format": "ssmdconvert.book",
+        "schema_version": 1,
         "metadata": {
             "title": "AudioExport Demo Book",
             "authors": ["AudioExport"],
@@ -71,8 +73,8 @@ def main() -> None:
         "destination",
         nargs="?",
         type=Path,
-        default=Path("demo.ssmdbook"),
-        help="new workspace directory (default: ./demo.ssmdbook)",
+        default=Path("demo.ssmd-bundle"),
+        help="new workspace directory (default: ./demo.ssmd-bundle)",
     )
     args = parser.parse_args()
     workspace = create_demo_workspace(args.destination)

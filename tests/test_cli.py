@@ -27,6 +27,18 @@ def test_version() -> None:
     assert "audioexport " in result.stdout
 
 
+def test_unified_bundle_parser_and_removed_flat_commands() -> None:
+    help_result = _run("bundle", "export", "--help")
+    assert help_result.returncode == 0, help_result.stderr
+    for option in ("BUNDLE", "--variant", "--chapters", "--format", "--timeline", "--profile"):
+        assert option in help_result.stdout
+
+    for removed in ("export" + chr(45) + "book", "export" + chr(45) + "document"):
+        result = _run(removed)
+        assert result.returncode != 0
+        assert "invalid choice" in result.stderr
+
+
 def test_cli_encode_inspect(wav: Path, have_tools: None) -> None:
     output = wav.with_name("cli.mp3")
     completed = _run(
@@ -178,7 +190,7 @@ def test_cli_audiobook_profile_overrides_metadata_and_output(
 
 def _book_fixture(tmp_path: Path, wav: Path) -> tuple[Path, str]:
     variant = "narration2--3b5f647f8f57"
-    workspace = tmp_path / "Platform Decay.ssmdbook"
+    workspace = tmp_path / "Platform Decay.ssmd-bundle"
     chapters_dir = workspace / "chapters"
     chapters_dir.mkdir(parents=True)
     variant_dir = workspace / "audiocompose" / variant
@@ -190,6 +202,8 @@ def _book_fixture(tmp_path: Path, wav: Path) -> tuple[Path, str]:
     (workspace / "manifest.json").write_text(
         json.dumps(
             {
+                "format": "ssmdconvert.book",
+                "schema_version": 1,
                 "metadata": {"title": "Platform Decay", "authors": ["Martha Wells"]},
                 "chapters": chapters,
             }
@@ -236,7 +250,8 @@ def test_cli_export_book_end_to_end_json_human_reuse_and_force(
 ) -> None:
     workspace, variant = _book_fixture(tmp_path, wav)
     arguments = (
-        "export-book",
+        "bundle",
+        "export",
         str(workspace),
         "--variant",
         variant,
@@ -253,7 +268,10 @@ def test_cli_export_book_end_to_end_json_human_reuse_and_force(
     )
     first = _run(*arguments, "--json")
     assert first.returncode == 0, first.stderr
-    result = json.loads(first.stdout)
+    envelope = json.loads(first.stdout)
+    assert envelope["format"] == "audioexport-bundle-result"
+    assert envelope["kind"] == "book"
+    result = envelope["result"]
     output = workspace / "audioexport" / variant / "Platform Decay.m4b"
     assert result["workspace"] == str(workspace)
     assert result["variant"] == variant
@@ -265,8 +283,6 @@ def test_cli_export_book_end_to_end_json_human_reuse_and_force(
     assert result["export_identity"]
     assert result["duration_ms"] > 0
     assert result["codec"] == "aac"
-    assert result["sample_rate"] == 24000
-    assert result["channels"] == 1
     assert result["reused"] is False
     assert Path(result["sidecar"]).is_file()
 
@@ -275,31 +291,35 @@ def test_cli_export_book_end_to_end_json_human_reuse_and_force(
     assert inspected["chapters"][1]["tags"]["title"] == "Chapter Two"
     audio = next(stream for stream in inspected["streams"] if stream["codec_type"] == "audio")
     assert audio["codec_name"] == "aac"
+    assert audio["sample_rate"] == "24000"
+    assert audio["channels"] == 1
     tags = {key.lower(): value for key, value in inspected["format"].get("tags", {}).items()}
     assert tags["title"] == "CLI title"
     assert tags["artist"] == "CLI author"
 
     repeated = _run(*arguments, "--json")
     assert repeated.returncode == 0, repeated.stderr
-    assert json.loads(repeated.stdout)["reused"] is True
+    assert json.loads(repeated.stdout)["result"]["reused"] is True
 
     human = _run(*arguments)
     assert human.returncode == 0, human.stderr
     for expected in (
+        "AudioExport bundle export",
+        "kind: book",
         "workspace:",
         "variant:",
-        "selected chapters:",
+        "selected chapters: 2",
         "input compose report:",
-        "export identity:",
+        "output:",
         "duration:",
-        "codec/sample-rate/channels:",
+        "codec:",
         "reused: yes",
     ):
         assert expected in human.stdout
 
     forced = _run(*arguments, "--force", "--json")
     assert forced.returncode == 0, forced.stderr
-    assert json.loads(forced.stdout)["reused"] is False
+    assert json.loads(forced.stdout)["result"]["reused"] is False
 
 
 def test_cli_export_book_forwards_custom_roots_and_reports_provenance(
@@ -312,7 +332,8 @@ def test_cli_export_book_forwards_custom_roots_and_reports_provenance(
     custom_output = tmp_path / "external-export"
     compose_report = custom_compose / variant / "compose-report.toml"
     arguments = (
-        "export-book",
+        "bundle",
+        "export",
         str(workspace),
         "--variant",
         variant,
@@ -324,7 +345,7 @@ def test_cli_export_book_forwards_custom_roots_and_reports_provenance(
 
     completed = _run(*arguments, "--json")
     assert completed.returncode == 0, completed.stderr
-    result = json.loads(completed.stdout)
+    result = json.loads(completed.stdout)["result"]
     assert result["input_compose_report"] == str(compose_report)
     assert result["output"] == str(custom_output / variant / "Platform Decay.m4b")
 
@@ -335,7 +356,7 @@ def test_cli_export_book_forwards_custom_roots_and_reports_provenance(
 
 def _document_fixture(tmp_path: Path, wav: Path) -> tuple[Path, str]:
     variant = "printer-cast--28f616b6fe3b"
-    workspace = tmp_path / "story.ssmdoc"
+    workspace = tmp_path / "story.ssmd-bundle"
     workspace.mkdir()
     (workspace / "manifest.json").write_text(
         json.dumps(
@@ -389,7 +410,8 @@ def test_cli_export_document_json_human_reuse_and_metadata(
 ) -> None:
     workspace, variant = _document_fixture(tmp_path, wav)
     arguments = (
-        "export-document",
+        "bundle",
+        "export",
         str(workspace),
         "--variant",
         variant,
@@ -406,7 +428,10 @@ def test_cli_export_document_json_human_reuse_and_metadata(
     )
     first = _run(*arguments, "--json")
     assert first.returncode == 0, first.stderr
-    result = json.loads(first.stdout)
+    envelope = json.loads(first.stdout)
+    assert envelope["format"] == "audioexport-bundle-result"
+    assert envelope["kind"] == "document"
+    result = envelope["result"]
     output = workspace / "audioexport" / variant / "story.mp3"
     assert result["workspace"] == str(workspace)
     assert result["variant"] == variant
@@ -418,7 +443,6 @@ def test_cli_export_document_json_human_reuse_and_metadata(
     assert result["export_identity"].startswith("sha256:")
     assert result["output_sha256"]
     assert result["reused"] is False
-    assert not first.stdout.startswith("workspace:")
 
     inspected = json.loads(_run("inspect", str(output), "--json").stdout)
     tags = {key.lower(): value for key, value in inspected["format"].get("tags", {}).items()}
@@ -428,27 +452,29 @@ def test_cli_export_document_json_human_reuse_and_metadata(
 
     repeated = _run(*arguments, "--json")
     assert repeated.returncode == 0, repeated.stderr
-    assert json.loads(repeated.stdout)["reused"] is True
+    assert json.loads(repeated.stdout)["result"]["reused"] is True
 
     human = _run(*arguments)
     assert human.returncode == 0, human.stderr
+    assert human.stdout.startswith("AudioExport bundle export")
     for field in (
+        "AudioExport bundle export",
+        "kind: document",
         "workspace:",
         "variant:",
         "document: document-0001",
         "input compose report:",
         "source:",
         "output:",
-        "export identity:",
         "duration:",
-        "codec/sample-rate/channels:",
+        "codec:",
         "reused: yes",
     ):
         assert field in human.stdout
-
     inferred_output = tmp_path / "inferred.opus"
     inferred = _run(
-        "export-document",
+        "bundle",
+        "export",
         str(workspace),
         "--variant",
         variant,
@@ -457,15 +483,16 @@ def test_cli_export_document_json_human_reuse_and_metadata(
         "--json",
     )
     assert inferred.returncode == 0, inferred.stderr
-    inferred_payload = json.loads(inferred.stdout)
+    inferred_payload = json.loads(inferred.stdout)["result"]
     assert inferred_payload["format"] == "opus"
     assert inferred_payload["output"] == str(inferred_output)
 
 
 def test_cli_export_document_errors_are_json_and_stable(tmp_path: Path) -> None:
     result = _run(
-        "export-document",
-        str(tmp_path / "bad.ssmdoc"),
+        "bundle",
+        "export",
+        str(tmp_path / "bad.ssmd-bundle"),
         "--variant",
         "v1",
         "--format",
@@ -476,13 +503,13 @@ def test_cli_export_document_errors_are_json_and_stable(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert result.stderr == ""
     payload = json.loads(result.stdout)
-    assert payload["error"]["code"] == "audioexport.document_workspace_invalid"
+    assert payload["error"]["code"] == "audioexport.bundle_invalid"
     assert payload["error"]["message"]
 
 
 def test_cli_export_document_requires_format_or_output(wav: Path, tmp_path: Path) -> None:
     workspace, variant = _document_fixture(tmp_path, wav)
-    result = _run("export-document", str(workspace), "--variant", variant, "--json")
+    result = _run("bundle", "export", str(workspace), "--variant", variant, "--json")
 
     assert result.returncode == 2
     assert json.loads(result.stdout)["error"]["code"] == "audioexport.document_format_required"
