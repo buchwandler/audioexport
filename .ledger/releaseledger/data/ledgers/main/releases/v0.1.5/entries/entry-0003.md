@@ -3,17 +3,18 @@ schema_version: 2
 object_type: release_entry
 versioning:
   schema_version: 1
-  revision: 1
+  revision: 2
 entry_id: entry-0003
-release_version: v0.1.4
+release_version: v0.1.5
 kind: added
 summary:
-  Listed AudioCompose bundle variants and exported all variants in deterministic,
-  variant-separated batches
+  Added read-only AudioCompose variant inventory and deterministic all-variant
+  exports with separated outputs
 status: accepted
 audience: null
 scopes: []
-source_refs: []
+source_refs:
+  - git:a9c572db84fd6f870cb9342dc85c8f7f124dc9dc
 paths:
   - audioexport/variants.py
   - audioexport/bundle.py
@@ -25,5 +26,5 @@ sources:
 contributors: []
 breaking: false
 internal: false
-order: 3
+order: 2
 ---

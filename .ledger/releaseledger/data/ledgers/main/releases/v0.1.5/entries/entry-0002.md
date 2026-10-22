@@ -3,13 +3,13 @@ schema_version: 2
 object_type: release_entry
 versioning:
   schema_version: 1
-  revision: 2
+  revision: 3
 entry_id: entry-0002
-release_version: v0.1.4
+release_version: v0.1.5
 kind: fixed
 summary:
-  Accepted current AudioCompose document reports with the nested `[output_geometry]`
-  table while retaining legacy flat geometry compatibility
+  Fixed support for nested AudioCompose document output geometry while preserving
+  legacy flat report compatibility
 status: accepted
 audience: null
 scopes: []
@@ -24,5 +24,5 @@ sources: []
 contributors: []
 breaking: false
 internal: false
-order: 2
+order: 1
 ---
