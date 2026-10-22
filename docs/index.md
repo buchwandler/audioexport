@@ -102,26 +102,32 @@ audioexport bundle export "My Book.ssmd-bundle" --variant "$VARIANT" \
 
 audioexport bundle export story.ssmd-bundle --variant "$VARIANT" \
   --output story.m4a --title "Story" --artist "An Author"
+
+# Read-only export-stage inventory; BUNDLE defaults to .
+audioexport bundle variants
+
+# Export every discovered variant in deterministic order.
+audioexport bundle export story.ssmd-bundle --format mp3
 ```
 
-AudioExport verifies the selected compose report, output paths, WAV digests, and audio geometry before export. Books use verified M4B assembly, support chapter selection and audiobook profiles, and accept only `--format m4b`. Documents support only `--chapters all`; `--format` or the output filename extension selects the final format, and `--timeline` supplies an optional generic chapter timeline. `--author` and `--artist` are aliases for the appropriate metadata field. Options unsupported for the detected kind fail explicitly.
+`audioexport bundle variants [BUNDLE]` inspects immediate AudioCompose variant directories and compose reports only. It is read-only, does not hash WAVs or create output directories, and reports malformed candidates without hiding other variants. Use `--json` for the `audioexport-bundle-variants` envelope or `--audiocompose-root PATH` for a custom stage root. Full render/compose pipeline status remains AudioCompose's concern.
 
-Default output stems strip `.ssmd-bundle`: book output is `audioexport/<variant>/<name>.m4b`, and document output is `audioexport/<variant>/<name>.<format>`. `--output-root` relocates these defaults and `--output` selects an explicit path. Book metadata precedence remains manifest, audiobook profile, then explicit API/CLI values. BCP 47 language tags such as `en-US` normalize to ISO 639-2/T track codes such as `eng` for M4A/M4B.
+AudioExport verifies selected reports, report-relative output paths, WAV checksums, and geometry before encoding. Current AudioCompose document reports use `[output_geometry]`; legacy flat geometry reports remain supported, while contradictory mixed layouts are rejected. Books use verified M4B assembly, support chapter selection and audiobook profiles, and accept only `--format m4b` (M4B is the default). Documents support only `--chapters all`; an explicit single-variant export accepts `--format` or infers it from `--output`, while all-variant document export requires `--format`. `--timeline` supplies an optional generic document chapter timeline.
 
-JSON output has one versioned envelope: `format: "audioexport-bundle-result"`, `version: 1`, `kind`, and kind-specific `result`. Human output begins with `AudioExport bundle export` and includes kind, workspace, variant, output, and the selected chapter count or composed document item.
+Single-variant default names strip only `.ssmd-bundle`: books use `audioexport/<variant>/<name>.m4b`, and documents use `audioexport/<variant>/<name>.<format>`. Omitting `--variant` exports every immediate AudioCompose variant in deterministic name order with variant-separated paths: `audioexport/<variant>/<name>.<format>` (books use `.m4b`). `--output-root` relocates single-variant defaults or, in batch mode, this whole tree. A single `--output FILE` requires explicit `--variant`; batch mode rejects it before encoding. Batch export is fail-fast and preserves outputs completed before a later variant fails. The existing single-result JSON envelope remains `audioexport-bundle-result`; batch export uses `audioexport-bundle-batch-result`. Human single-variant output begins with `AudioExport bundle export` and reports kind, workspace, variant, output, and the selected chapter count or composed document item; batch output lists each variant and output. Book metadata precedence remains manifest, audiobook profile, then explicit API/CLI values. BCP 47 language tags such as `en-US` normalize to ISO 639-2/T codes such as `eng` for M4A/M4B. `--author` and `--artist` are aliases for the appropriate metadata field.
 
-Python callers use the same facade:
+Python callers can use the same facade:
 
 ```python
-from audioexport import export_bundle
+from audioexport import export_bundle, export_bundle_all, list_bundle_variants
 
-book_result = export_bundle("My Book.ssmd-bundle", variant=variant, chapters="5,7")
-document_result = export_bundle("story.ssmd-bundle", variant=variant, format="mp3")
-print(book_result.kind, book_result.output)
-print(document_result.kind, document_result.output)
+inventory = list_bundle_variants("story.ssmd-bundle")
+single = export_bundle("story.ssmd-bundle", variant=variant, format="mp3")
+batch = export_bundle_all("story.ssmd-bundle", format="mp3")
+print(inventory.to_dict(), single.output, batch.outputs)
 ```
 
-`BundleExportResult.value` holds the specialized export result. The facade is available from both `audioexport` and `audioexport.api`.
+`BundleExportResult.value` holds the specialized book or document result, and its `output` property gives the artifact path. `BundleExportResult` remains the single-variant result; `BundleExportBatchResult` carries ordered per-variant results and outputs. Both APIs and the variant inventory types are available from `audioexport` and `audioexport.api`.
 
 The public API is available from both `audioexport` and `audioexport.api`:
 
@@ -150,6 +156,8 @@ Important public entry points include:
 - `run_profile()` for multiple configured outputs
 - `build_audiobook()` for ordered-track assembly
 - `export_bundle()` for verified book or document bundle export; `BundleExportResult` exposes the detected kind, specialized result, and output path
+- `export_bundle_all()` for deterministic all-variant batch exports; `BundleExportBatchResult` contains ordered per-variant results and outputs
+- `list_bundle_variants()` for read-only inventory; `BundleVariantInfo` and `BundleVariantsResult` describe discovered variants
 - `BundleIdentity` and the `audioexport.bundle_contract` loader for safe canonical-root and manifest-kind validation
 - `preflight_profile()` for read-only profile validation
 - `doctor()` and `probe()` for tool and artifact diagnostics

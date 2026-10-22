@@ -12,12 +12,13 @@ from typing import Any
 from . import __version__
 from .audiobook import build_audiobook
 from .audiobook_profile import load_audiobook_profile, resolve_profile_overrides
-from .bundle import export_bundle
+from .bundle import export_bundle, export_bundle_all
 from .errors import AudioExportError
 from .fftools import doctor, probe
 from .formats import FORMATS
 from .metadata import AudiobookMetadata
 from .pipeline import encode, run_profile
+from .variants import list_bundle_variants
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -89,10 +90,12 @@ def _parser() -> argparse.ArgumentParser:
     bundle_parser = sub.add_parser("bundle", help="Export an SSMD bundle")
     bundle_commands = bundle_parser.add_subparsers(dest="bundle_command", required=True)
     bundle_export = bundle_commands.add_parser(
-        "export", help="Export a composed SSMD bundle variant"
+        "export", help="Export one or all composed SSMD bundle variants"
     )
     bundle_export.add_argument("bundle", type=Path, metavar="BUNDLE")
-    bundle_export.add_argument("--variant", required=True)
+    bundle_export.add_argument(
+        "--variant", help="export one variant; omit to export every AudioCompose variant"
+    )
     bundle_export.add_argument("--chapters", default="all", metavar="SELECTOR")
     bundle_export.add_argument("-o", "--output", type=Path)
     bundle_export.add_argument("--format", choices=tuple(FORMATS))
@@ -123,6 +126,15 @@ def _parser() -> argparse.ArgumentParser:
     bundle_export.add_argument("--json", action="store_true")
     bundle_export.add_argument("--ffmpeg")
     bundle_export.add_argument("--ffprobe")
+
+    bundle_variants = bundle_commands.add_parser(
+        "variants", help="List AudioCompose variants available to AudioExport"
+    )
+    bundle_variants.add_argument(
+        "bundle", type=Path, nargs="?", default=Path("."), metavar="BUNDLE"
+    )
+    bundle_variants.add_argument("--audiocompose-root", type=Path)
+    bundle_variants.add_argument("--json", action="store_true")
     inspect = sub.add_parser("inspect", help="Inspect audio and audioexport sidecar")
     inspect.add_argument("input", type=Path)
     inspect.add_argument("--json", action="store_true")
@@ -217,6 +229,55 @@ def _print_bundle_export(payload: Mapping[str, Any], *, as_json: bool) -> None:
     print(f"reused: {'yes' if result['reused'] else 'no'}")
 
 
+def _print_bundle_variants(payload: Mapping[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        _print(payload, as_json=True)
+        return
+    print("AudioExport bundle variants")
+    print(f"kind: {payload['kind']}")
+    print(f"workspace: {payload['workspace']}")
+    print(f"audiocompose root: {payload['audiocompose_root']}")
+    variants = payload["variants"]
+    print(f"variants: {len(variants)}")
+    if not variants:
+        return
+    print()
+    print("VARIANT                       STATE          STATUS   ITEMS  OUTPUT")
+    for item in variants:
+        name = item["name"]
+        state = item["state"]
+        status = item.get("status") or "-"
+        items = f"{item['usable_items']}/{item['total_items']}"
+        output = item.get("output") or "-"
+        print(f"{name:<29} {state:<14} {status:<8} {items:<6} {output}")
+        if item.get("error"):
+            print(f"  error: {item['error']}")
+
+
+def _print_bundle_export_batch(payload: Mapping[str, Any], *, as_json: bool) -> None:
+    if as_json:
+        _print(payload, as_json=True)
+        return
+    results = payload["results"]
+    count = len(results)
+    print("AudioExport bundle export")
+    print(f"kind: {payload['kind']}")
+    print(f"workspace: {payload['workspace']}")
+    print(f"variants: {count}")
+    for index, result in enumerate(results, 1):
+        print()
+        print(f"[{index}/{count}] {result['variant']}")
+        print(f"output: {result['output']}")
+        if result.get("codec") is not None:
+            print(f"codec: {result['codec']}")
+        duration_ms = result.get("duration_ms")
+        if isinstance(duration_ms, (int, float)):
+            print(f"duration: {duration_ms / 1000:.3f} s")
+        elif isinstance(result.get("duration_seconds"), (int, float)):
+            print(f"duration: {result['duration_seconds']:.3f} s")
+        print(f"reused: {'yes' if result['reused'] else 'no'}")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -271,27 +332,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _print([item.to_dict() for item in results], as_json=args.json)
             return 0
-        if args.command == "bundle" and args.bundle_command == "export":
-            bundle_result = export_bundle(
+        if args.command == "bundle" and args.bundle_command == "variants":
+            variants_result = list_bundle_variants(
                 args.bundle,
-                variant=args.variant,
-                chapters=args.chapters,
-                output=args.output,
-                format=args.format,
-                profile=args.profile,
-                bitrate=args.bitrate,
-                sample_rate=args.sample_rate,
-                channels=args.channels,
-                metadata=_bundle_metadata_values(args),
-                cover=args.cover,
-                timeline=args.timeline,
                 audiocompose_root=args.audiocompose_root,
-                output_root=args.output_root,
-                force=args.force,
-                ffmpeg=args.ffmpeg,
-                ffprobe=args.ffprobe,
             )
-            _print_bundle_export(bundle_result.to_dict(), as_json=args.json)
+            _print_bundle_variants(variants_result.to_dict(), as_json=args.json)
+            return 0
+        if args.command == "bundle" and args.bundle_command == "export":
+            export_options = {
+                "bundle": args.bundle,
+                "chapters": args.chapters,
+                "output": args.output,
+                "format": args.format,
+                "profile": args.profile,
+                "bitrate": args.bitrate,
+                "sample_rate": args.sample_rate,
+                "channels": args.channels,
+                "metadata": _bundle_metadata_values(args),
+                "cover": args.cover,
+                "timeline": args.timeline,
+                "audiocompose_root": args.audiocompose_root,
+                "output_root": args.output_root,
+                "force": args.force,
+                "ffmpeg": args.ffmpeg,
+                "ffprobe": args.ffprobe,
+            }
+            if args.variant is None:
+                batch_result = export_bundle_all(**export_options)
+                _print_bundle_export_batch(batch_result.to_dict(), as_json=args.json)
+            else:
+                bundle_result = export_bundle(variant=args.variant, **export_options)
+                _print_bundle_export(bundle_result.to_dict(), as_json=args.json)
             return 0
         if args.command == "audiobook":
             metadata_values: dict[str, str] = {}

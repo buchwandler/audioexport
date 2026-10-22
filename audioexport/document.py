@@ -31,6 +31,13 @@ from .pipeline import ExportResult, encode
 
 _DOCUMENT_ID = "document-0001"
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_DOCUMENT_GEOMETRY_FIELDS = (
+    "sha256",
+    "sample_rate",
+    "channels",
+    "frames",
+    "duration_seconds",
+)
 _REQUIRED_PROVENANCE = (
     "render_profile_id",
     "source_plan_id",
@@ -305,6 +312,25 @@ def _reported_sha256(value: Any) -> str:
     return digest
 
 
+def _document_output_geometry(report: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Normalize current nested and legacy flat document report geometry."""
+    if "output_geometry" not in report:
+        return report
+
+    geometry = report["output_geometry"]
+    if not isinstance(geometry, Mapping):
+        raise _fail(
+            "compose report output_geometry must be a table",
+            code="audioexport.document_compose_report_invalid",
+        )
+    if any(field in report for field in _DOCUMENT_GEOMETRY_FIELDS):
+        raise _fail(
+            "compose report must not mix output_geometry with legacy top-level geometry fields",
+            code="audioexport.document_compose_report_invalid",
+        )
+    return geometry
+
+
 def _verified_document(variant_dir: Path, report: Mapping[str, Any]) -> ComposedDocument:
     source = safe_report_file(
         variant_dir,
@@ -316,8 +342,9 @@ def _verified_document(variant_dir: Path, report: Mapping[str, Any]) -> Composed
             f"compose report output must resolve to {_DOCUMENT_ID}.wav",
             code="audioexport.document_compose_output_invalid",
         )
+    geometry = _document_output_geometry(report)
     actual_sha256 = sha256_file(source, error_code="audioexport.document_compose_hash_mismatch")
-    expected_sha256 = _reported_sha256(report.get("sha256"))
+    expected_sha256 = _reported_sha256(geometry.get("sha256"))
     if actual_sha256.casefold() != expected_sha256.casefold():
         raise VerificationError(
             f"composed document checksum does not match the report: {source}",
@@ -325,10 +352,10 @@ def _verified_document(variant_dir: Path, report: Mapping[str, Any]) -> Composed
         )
     rate, channels, frames, duration = verify_reported_wav(
         source,
-        report,
+        geometry,
         report_code="audioexport.document_compose_report_invalid",
         geometry_code="audioexport.document_compose_geometry_mismatch",
-        item_label="document compose report",
+        item_label="document compose report output_geometry",
     )
     return ComposedDocument(
         id=_DOCUMENT_ID,

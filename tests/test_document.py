@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import shutil
 import wave
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -65,19 +67,35 @@ def _workspace(tmp_path: Path) -> tuple[Path, Path, dict[str, Any]]:
         "audiocompose_version": "0.3.1",
         "status": "written",
         "output": f"{DOCUMENT_ID}.wav",
-        "sha256": f"sha256:{hashlib.sha256(wav_path.read_bytes()).hexdigest()}",
-        "sample_rate": 8000,
-        "channels": 1,
-        "frames": 800,
-        "duration_seconds": 0.1,
+        "output_geometry": {
+            "sha256": f"sha256:{hashlib.sha256(wav_path.read_bytes()).hexdigest()}",
+            "sample_rate": 8000,
+            "channels": 1,
+            "frames": 800,
+            "duration_seconds": 0.1,
+        },
     }
     _write_report(variant_dir / "compose-report.toml", report)
     return workspace, wav_path, report
 
 
+def _toml_scalar(value: Any) -> str:
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            return "nan"
+        return "inf" if value > 0 else "-inf"
+    return json.dumps(value)
+
+
 def _write_report(path: Path, report: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{key} = {json.dumps(value)}" for key, value in report.items()]
+    lines: list[str] = []
+    for key, value in report.items():
+        if isinstance(value, Mapping):
+            lines.extend(("", f"[{key}]"))
+            lines.extend(f"{field} = {_toml_scalar(item)}" for field, item in value.items())
+        else:
+            lines.append(f"{key} = {_toml_scalar(value)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -114,11 +132,61 @@ def test_resolves_bundle_root_without_creating_output(tmp_path: Path) -> None:
 
 def test_accepts_bare_sha256_and_reused_status(tmp_path: Path) -> None:
     workspace, wav_path, report = _workspace(tmp_path)
-    report["sha256"] = hashlib.sha256(wav_path.read_bytes()).hexdigest()
+    report["output_geometry"]["sha256"] = hashlib.sha256(wav_path.read_bytes()).hexdigest()
     report["status"] = "reused"
     _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
 
-    assert _resolve(workspace).document.sha256 == report["sha256"]
+    assert _resolve(workspace).document.sha256 == report["output_geometry"]["sha256"]
+
+
+def test_current_audiocompose_toml_shape_uses_output_geometry(tmp_path: Path) -> None:
+    workspace, _, _ = _workspace(tmp_path)
+    report_path = workspace / "audiocompose" / VARIANT / "compose-report.toml"
+    report_text = report_path.read_text(encoding="utf-8")
+
+    assert "\n[output_geometry]\n" in report_text
+    assert 'sha256 = "sha256:' in report_text
+    assert _resolve(workspace).document.sha256
+
+
+@pytest.mark.parametrize("bare_digest", [False, True])
+def test_accepts_legacy_flat_geometry(tmp_path: Path, bare_digest: bool) -> None:
+    workspace, wav_path, report = _workspace(tmp_path)
+    geometry = report.pop("output_geometry")
+    report.update(geometry)
+    if bare_digest:
+        report["sha256"] = hashlib.sha256(wav_path.read_bytes()).hexdigest()
+    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
+
+    assert _resolve(workspace).document.sha256 == report["sha256"].removeprefix("sha256:")
+
+
+def test_rejects_non_table_output_geometry(tmp_path: Path) -> None:
+    workspace, _, report = _workspace(tmp_path)
+    report["output_geometry"] = "not a table"
+    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
+
+    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_report_invalid")
+
+
+@pytest.mark.parametrize("sha256", [None, "invalid"])
+def test_rejects_missing_or_invalid_nested_sha256(tmp_path: Path, sha256: Any) -> None:
+    workspace, _, report = _workspace(tmp_path)
+    if sha256 is None:
+        del report["output_geometry"]["sha256"]
+    else:
+        report["output_geometry"]["sha256"] = sha256
+    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
+
+    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_report_invalid")
+
+
+def test_rejects_mixed_nested_and_legacy_geometry(tmp_path: Path) -> None:
+    workspace, _, report = _workspace(tmp_path)
+    report["sample_rate"] = 8000
+    _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
+
+    _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_report_invalid")
 
 
 @pytest.mark.parametrize(
@@ -318,7 +386,10 @@ def test_rejects_unsafe_or_invalid_report_output(
     tmp_path: Path, field: str, value: Any, expected: str
 ) -> None:
     workspace, _, report = _workspace(tmp_path)
-    report[field] = value
+    if field == "sha256":
+        report["output_geometry"][field] = value
+    else:
+        report[field] = value
     _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
 
     _assert_code(lambda: _resolve(workspace), expected)
@@ -387,13 +458,15 @@ def test_rejects_report_hash_mismatch_before_encoder(
         ("frames", 801, "audioexport.document_compose_geometry_mismatch"),
         ("duration_seconds", 0.2, "audioexport.document_compose_geometry_mismatch"),
         ("duration_seconds", -1, "audioexport.document_compose_report_invalid"),
+        ("duration_seconds", float("inf"), "audioexport.document_compose_report_invalid"),
+        ("duration_seconds", float("nan"), "audioexport.document_compose_report_invalid"),
     ],
 )
 def test_rejects_reported_wav_geometry_mismatch(
     tmp_path: Path, field: str, value: Any, expected: str
 ) -> None:
     workspace, _, report = _workspace(tmp_path)
-    report[field] = value
+    report["output_geometry"][field] = value
     _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
 
     _assert_code(lambda: _resolve(workspace), expected)
@@ -402,13 +475,13 @@ def test_rejects_reported_wav_geometry_mismatch(
 def test_rejects_non_wav_and_truncated_wav(tmp_path: Path) -> None:
     workspace, wav_path, report = _workspace(tmp_path / "not-wav")
     wav_path.write_bytes(b"not a wav")
-    report["sha256"] = hashlib.sha256(wav_path.read_bytes()).hexdigest()
+    report["output_geometry"]["sha256"] = hashlib.sha256(wav_path.read_bytes()).hexdigest()
     _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
     _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_geometry_mismatch")
 
     workspace, wav_path, report = _workspace(tmp_path / "truncated")
     wav_path.write_bytes(wav_path.read_bytes()[:-4])
-    report["sha256"] = hashlib.sha256(wav_path.read_bytes()).hexdigest()
+    report["output_geometry"]["sha256"] = hashlib.sha256(wav_path.read_bytes()).hexdigest()
     _write_report(workspace / "audiocompose" / VARIANT / "compose-report.toml", report)
     _assert_code(lambda: _resolve(workspace), "audioexport.document_compose_geometry_mismatch")
 

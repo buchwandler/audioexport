@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 
-def _run(*args: str) -> subprocess.CompletedProcess[str]:
+def _run(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(Path(__file__).parents[1])
     return subprocess.run(
@@ -17,6 +17,7 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         capture_output=True,
         env=env,
+        cwd=cwd,
         check=False,
     )
 
@@ -392,17 +393,41 @@ def _document_fixture(tmp_path: Path, wav: Path) -> tuple[Path, str]:
         "audiocompose_version": "0.3.1",
         "status": "written",
         "output": artifact.name,
-        "sha256": f"sha256:{hashlib.sha256(artifact.read_bytes()).hexdigest()}",
-        "sample_rate": 24000,
-        "channels": 1,
-        "frames": 48000,
-        "duration_seconds": 2.0,
+        "output_geometry": {
+            "sha256": f"sha256:{hashlib.sha256(artifact.read_bytes()).hexdigest()}",
+            "sample_rate": 24000,
+            "channels": 1,
+            "frames": 48000,
+            "duration_seconds": 2.0,
+        },
     }
+    report_lines: list[str] = []
+    for key, value in report.items():
+        if isinstance(value, dict):
+            report_lines.extend(("", f"[{key}]"))
+            report_lines.extend(
+                f"{nested_key} = {json.dumps(nested_value)}"
+                for nested_key, nested_value in value.items()
+            )
+        else:
+            report_lines.append(f"{key} = {json.dumps(value)}")
     (variant_dir / "compose-report.toml").write_text(
-        "\n".join(f"{key} = {json.dumps(value)}" for key, value in report.items()) + "\n",
-        encoding="utf-8",
+        "\n".join(report_lines) + "\n", encoding="utf-8"
     )
     return workspace, variant
+
+
+def _clone_compose_variant(workspace: Path, source_variant: str, variant: str) -> Path:
+    source = workspace / "audiocompose" / source_variant
+    target = workspace / "audiocompose" / variant
+    shutil.copytree(source, target)
+    report_path = target / "compose-report.toml"
+    report_text = report_path.read_text(encoding="utf-8")
+    old_variant = f'variant = "{source_variant}"'
+    new_variant = f'variant = "{variant}"'
+    assert old_variant in report_text
+    report_path.write_text(report_text.replace(old_variant, new_variant, 1), encoding="utf-8")
+    return target
 
 
 def test_cli_export_document_json_human_reuse_and_metadata(
@@ -513,3 +538,214 @@ def test_cli_export_document_requires_format_or_output(wav: Path, tmp_path: Path
 
     assert result.returncode == 2
     assert json.loads(result.stdout)["error"]["code"] == "audioexport.document_format_required"
+
+
+def test_cli_bundle_variants_defaults_bundle_and_has_json_and_human_output(
+    wav: Path, tmp_path: Path
+) -> None:
+    workspace, variant = _document_fixture(tmp_path, wav)
+
+    default = _run("bundle", "variants", "--json", cwd=workspace)
+    assert default.returncode == 0, default.stderr
+    payload = json.loads(default.stdout)
+    assert payload["format"] == "audioexport-bundle-variants"
+    assert payload["version"] == 1
+    assert payload["kind"] == "document"
+    assert payload["variants"][0]["name"] == variant
+    assert payload["variants"][0]["state"] == "ready"
+    assert not (workspace / "audioexport").exists()
+
+    explicit = _run("bundle", "variants", ".", "--json", cwd=workspace)
+    assert explicit.returncode == 0, explicit.stderr
+    assert json.loads(explicit.stdout) == payload
+
+    human = _run("bundle", "variants", cwd=workspace)
+    assert human.returncode == 0, human.stderr
+    assert "AudioExport bundle variants" in human.stdout
+    assert variant in human.stdout
+    assert "ready" in human.stdout
+
+    external_root = tmp_path / "external-compose"
+    shutil.copytree(workspace / "audiocompose", external_root)
+    custom = _run(
+        "bundle",
+        "variants",
+        str(workspace),
+        "--audiocompose-root",
+        str(external_root),
+        "--json",
+    )
+    assert custom.returncode == 0, custom.stderr
+    assert json.loads(custom.stdout)["audiocompose_root"] == str(external_root)
+
+
+def test_cli_batch_document_export_separates_outputs_and_reuses(
+    wav: Path, tmp_path: Path, have_tools: None
+) -> None:
+    workspace, first_variant = _document_fixture(tmp_path, wav)
+    second_variant = "alpha--aaaaaaaaaaaa"
+    _clone_compose_variant(workspace, first_variant, second_variant)
+    output_root = tmp_path / "all-exports"
+    arguments = (
+        "bundle",
+        "export",
+        str(workspace),
+        "--format",
+        "mp3",
+        "--output-root",
+        str(output_root),
+    )
+
+    first = _run(*arguments, "--json")
+    assert first.returncode == 0, first.stderr
+    envelope = json.loads(first.stdout)
+    assert envelope["format"] == "audioexport-bundle-batch-result"
+    assert envelope["version"] == 1
+    assert envelope["count"] == 2
+    results = envelope["results"]
+    assert [result["variant"] for result in results] == sorted([first_variant, second_variant])
+    for result in results:
+        output = output_root / result["variant"] / "story.mp3"
+        assert result["output"] == str(output)
+        assert Path(result["sidecar"]).is_file()
+
+    human = _run(*arguments)
+    assert human.returncode == 0, human.stderr
+    assert "variants: 2" in human.stdout
+    assert first_variant in human.stdout
+    assert second_variant in human.stdout
+
+    repeated = _run(*arguments, "--json")
+    assert repeated.returncode == 0, repeated.stderr
+    assert all(result["reused"] for result in json.loads(repeated.stdout)["results"])
+
+
+def test_cli_batch_output_option_and_empty_variant_root_fail_before_encoding(
+    wav: Path, tmp_path: Path
+) -> None:
+    workspace, variant = _document_fixture(tmp_path, wav)
+    output_error = _run(
+        "bundle",
+        "export",
+        str(workspace),
+        "--format",
+        "mp3",
+        "--output",
+        str(tmp_path / "one.mp3"),
+        "--json",
+    )
+    assert output_error.returncode == 2
+    assert json.loads(output_error.stdout)["error"]["code"] == "audioexport.bundle_option_invalid"
+    assert not (workspace / "audioexport").exists()
+
+    shutil.rmtree(workspace / "audiocompose" / variant)
+    no_variants = _run("bundle", "export", str(workspace), "--format", "mp3", "--json")
+    assert no_variants.returncode == 2
+    assert json.loads(no_variants.stdout)["error"]["code"] == "audioexport.bundle_no_variants"
+    assert not (workspace / "audioexport").exists()
+
+
+def test_cli_batch_keeps_prior_outputs_and_reuses_them_after_report_repair(
+    wav: Path, tmp_path: Path, have_tools: None
+) -> None:
+    workspace, original_variant = _document_fixture(tmp_path, wav)
+    first_variant = "a-first--aaaaaaaaaaaa"
+    broken_variant = "z-broken--zzzzzzzzzzzz"
+    _clone_compose_variant(workspace, original_variant, first_variant)
+    broken_dir = _clone_compose_variant(workspace, original_variant, broken_variant)
+    report_path = broken_dir / "compose-report.toml"
+    report_path.write_text("format = [\n", encoding="utf-8")
+    command = ("bundle", "export", str(workspace), "--format", "mp3", "--json")
+
+    failed = _run(*command)
+    assert failed.returncode == 2
+    assert (
+        json.loads(failed.stdout)["error"]["code"] == "audioexport.document_compose_report_invalid"
+    )
+    first_output = workspace / "audioexport" / first_variant / "story.mp3"
+    original_output = workspace / "audioexport" / original_variant / "story.mp3"
+    assert first_output.is_file()
+    assert original_output.is_file()
+    assert not (workspace / "audioexport" / broken_variant / "story.mp3").exists()
+
+    source_report = (
+        workspace / "audiocompose" / original_variant / "compose-report.toml"
+    ).read_text(encoding="utf-8")
+    report_path.write_text(
+        source_report.replace(
+            f'variant = "{original_variant}"', f'variant = "{broken_variant}"', 1
+        ),
+        encoding="utf-8",
+    )
+    repaired = _run(*command)
+    assert repaired.returncode == 0, repaired.stderr
+    results = json.loads(repaired.stdout)["results"]
+    assert results[0]["variant"] == first_variant
+    assert results[0]["reused"] is True
+    assert results[1]["variant"] == original_variant
+    assert results[1]["reused"] is True
+    assert results[2]["variant"] == broken_variant
+
+
+def test_cli_batch_book_defaults_to_m4b_and_supports_profile_chapters_and_geometry(
+    wav: Path, tmp_path: Path, have_tools: None
+) -> None:
+    workspace, first_variant = _book_fixture(tmp_path, wav)
+    second_variant = "fast--bbbbbbbbbbbb"
+    _clone_compose_variant(workspace, first_variant, second_variant)
+    profile = tmp_path / "book-profile.toml"
+    profile.write_text(
+        'schema = "audioexport.audiobook.v1"\n'
+        'output = "profile-book.m4b"\n'
+        f"inputs = [{json.dumps(str(wav))}]\n"
+        '[audio]\nbitrate = "96k"\nsample_rate = 44100\nchannels = 2\n'
+        '[metadata]\ntitle = "Profile title"\nauthor = "Profile author"\n',
+        encoding="utf-8",
+    )
+
+    result = _run(
+        "bundle",
+        "export",
+        str(workspace),
+        "--profile",
+        str(profile),
+        "--chapters",
+        "2",
+        "--sample-rate",
+        "24000",
+        "--channels",
+        "1",
+        "--json",
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["count"] == 2
+    assert [item["variant"] for item in payload["results"]] == sorted(
+        [first_variant, second_variant]
+    )
+    for item in payload["results"]:
+        assert item["output"] == str(
+            workspace / "audioexport" / item["variant"] / "profile-book.m4b"
+        )
+        assert item["selected_chapters"] == ["chapter-two"]
+        assert item["codec"] == "aac"
+
+
+def test_cli_batch_book_rejects_mp3_and_timeline_before_output(wav: Path, tmp_path: Path) -> None:
+    workspace, _ = _book_fixture(tmp_path, wav)
+    mp3 = _run("bundle", "export", str(workspace), "--format", "mp3", "--json")
+    assert mp3.returncode == 2
+    assert json.loads(mp3.stdout)["error"]["code"] == "audioexport.bundle_option_invalid"
+    assert not (workspace / "audioexport").exists()
+
+    timeline = _run(
+        "bundle",
+        "export",
+        str(workspace),
+        "--timeline",
+        str(tmp_path / "timeline.json"),
+        "--json",
+    )
+    assert timeline.returncode == 2
+    assert json.loads(timeline.stdout)["error"]["code"] == "audioexport.bundle_option_invalid"
+    assert not (workspace / "audioexport").exists()

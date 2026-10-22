@@ -13,7 +13,7 @@ from .book import (
     export_book,
     resolve_book_export,
 )
-from .bundle import BundleExportResult, export_bundle
+from .bundle import BundleExportBatchResult, BundleExportResult, export_bundle, export_bundle_all
 from .chapters import Chapter, load_chapters
 from .document import (
     ComposedDocument,
@@ -35,6 +35,7 @@ from .metadata import AudiobookMetadata
 from .pipeline import ExportResult, encode, run_profile
 from .preflight import preflight_profile
 from .profile import ExportProfile, OutputSpec, ResolvedOutput, load_profile, resolve_output
+from .variants import BundleVariantInfo, BundleVariantsResult, list_bundle_variants
 
 try:
     __version__ = version("audioexport")
@@ -51,7 +52,10 @@ __all__ = [
     "AudiobookTrack",
     "BookExportContext",
     "BookExportResult",
+    "BundleExportBatchResult",
     "BundleExportResult",
+    "BundleVariantInfo",
+    "BundleVariantsResult",
     "Chapter",
     "ComposedChapter",
     "ComposedDocument",
@@ -71,7 +75,9 @@ __all__ = [
     "encode",
     "export_book",
     "export_bundle",
+    "export_bundle_all",
     "export_document",
+    "list_bundle_variants",
     "load_audiobook_profile",
     "load_chapters",
     "load_profile",
