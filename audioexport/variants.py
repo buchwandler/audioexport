@@ -6,7 +6,7 @@ import stat
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 
 if sys.version_info >= (3, 11):
@@ -258,6 +258,44 @@ def _inspect_variant(
         return _invalid_info(name, report_path, str(exc))
 
 
+def _nested_variant_candidates(stage_root: Path, entry: Path) -> tuple[tuple[str, Path], ...]:
+    """Find malformed nested candidates created by Windows path separators.
+
+    A backslash cannot be part of a Windows filename.  Consequently, a test or
+    producer that joins an unsafe variant name to a ``Path`` may create nested
+    directories instead.  Surface those reports as invalid candidates rather
+    than silently treating only the first directory as a missing-report variant.
+    """
+    if sys.platform != "win32":
+        return ()
+
+    pending = [entry]
+    candidates: list[tuple[str, Path]] = []
+    while pending:
+        current = pending.pop()
+        try:
+            children = sorted(current.iterdir(), key=lambda child: child.name)
+        except OSError:
+            continue
+        for child in children:
+            try:
+                child_stat = child.lstat()
+            except OSError:
+                continue
+            if child.name == "compose-report.toml":
+                try:
+                    relative = child.parent.relative_to(stage_root)
+                except ValueError:
+                    continue
+                if len(relative.parts) > 1:
+                    candidates.append((str(PureWindowsPath(*relative.parts)), child.parent))
+                continue
+            if stat.S_ISDIR(child_stat.st_mode):
+                pending.append(child)
+
+    return tuple(sorted(candidates, key=lambda candidate: candidate[0]))
+
+
 def list_bundle_variants(
     bundle: str | Path = ".",
     *,
@@ -289,7 +327,10 @@ def list_bundle_variants(
             continue
         if stat.S_ISDIR(child_stat.st_mode) or stat.S_ISLNK(child_stat.st_mode):
             variants.append(_inspect_variant(identity.kind, stage_root, child.name, child))
-
+            if stat.S_ISDIR(child_stat.st_mode):
+                for name, nested_entry in _nested_variant_candidates(stage_root, child):
+                    variants.append(_inspect_variant(identity.kind, stage_root, name, nested_entry))
+    variants.sort(key=lambda variant: variant.name)
     return BundleVariantsResult(
         workspace=identity.root,
         kind=identity.kind,
