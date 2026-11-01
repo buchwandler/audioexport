@@ -5,13 +5,22 @@ from pathlib import Path
 
 import pytest
 
-from audioexport import Chapter, InvalidExportError, encode, normalize_bitrate, probe, run_profile
+from audioexport import (
+    Chapter,
+    InvalidExportError,
+    encode,
+    normalize_bitrate,
+    pipeline,
+    probe,
+    run_profile,
+)
 from audioexport.chapters import (
     escape_ffmetadata_value,
     ffmetadata_text,
     load_chapters,
     normalize_chapters,
 )
+from audioexport.errors import VerificationError
 from audioexport.formats import FORMATS, encoder_options
 
 
@@ -159,3 +168,113 @@ def test_bad_profile(tmp_path: Path) -> None:
     )
     with pytest.raises(InvalidExportError):
         load_profile(f)
+
+
+def _run_metadata_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fmt: str,
+    tags: dict[str, str],
+    metadata: dict[str, str],
+) -> None:
+    info = {
+        "streams": [
+            {
+                "codec_type": "audio",
+                "codec_name": pipeline.EXPECTED_CODECS[fmt],
+                "channels": 2,
+                "sample_rate": "44100",
+                "tags": {},
+            }
+        ],
+        "format": {"tags": tags},
+        "chapters": [],
+    }
+    monkeypatch.setattr(pipeline, "probe", lambda _path, _ffprobe: info)
+    monkeypatch.setattr(pipeline, "_duration_ms", lambda _info: 1000)
+    pipeline._verify_output(
+        Path(f"book.{fmt}"),
+        fmt=fmt,
+        chapters=(),
+        cover=None,
+        metadata=metadata,
+        ffprobe="ffprobe",
+        source_duration_ms=1000,
+    )
+
+
+@pytest.mark.parametrize(
+    ("fmt", "key"),
+    [(fmt, key) for fmt in ("m4a", "m4b") for key in ("publisher", "encoded_by")],
+)
+def test_m4a_m4b_allow_missing_best_effort_metadata(
+    monkeypatch: pytest.MonkeyPatch, fmt: str, key: str
+) -> None:
+    _run_metadata_verification(monkeypatch, fmt=fmt, tags={}, metadata={key: "Expected value"})
+
+
+@pytest.mark.parametrize("key", ["publisher", "encoded_by"])
+def test_m4a_m4b_best_effort_metadata_still_rejects_wrong_value(
+    monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    with pytest.raises(VerificationError) as error:
+        _run_metadata_verification(
+            monkeypatch,
+            fmt="m4b",
+            tags={key: "Wrong value"},
+            metadata={key: "Expected value"},
+        )
+    assert error.value.code == "audioexport.metadata_mismatch"
+
+
+@pytest.mark.parametrize("key", ["publisher", "encoded_by"])
+def test_m4a_m4b_best_effort_metadata_accepts_matching_value(
+    monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    _run_metadata_verification(
+        monkeypatch,
+        fmt="m4b",
+        tags={key: "Expected value"},
+        metadata={key: "Expected value"},
+    )
+
+
+def test_missing_title_remains_a_metadata_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(VerificationError) as error:
+        _run_metadata_verification(
+            monkeypatch,
+            fmt="m4b",
+            tags={},
+            metadata={"title": "Expected title"},
+        )
+    assert error.value.code == "audioexport.metadata_mismatch"
+
+
+def test_m4b_language_metadata_remains_normalized_and_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _run_metadata_verification(
+        monkeypatch,
+        fmt="m4b",
+        tags={"language": "eng"},
+        metadata={"language": "en-US"},
+    )
+    with pytest.raises(VerificationError) as error:
+        _run_metadata_verification(
+            monkeypatch,
+            fmt="m4b",
+            tags={"language": "fra"},
+            metadata={"language": "en-US"},
+        )
+    assert error.value.code == "audioexport.metadata_mismatch"
+
+
+def test_publisher_remains_strict_outside_m4a_m4b(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(VerificationError) as error:
+        _run_metadata_verification(
+            monkeypatch,
+            fmt="mp3",
+            tags={},
+            metadata={"publisher": "Expected Press"},
+        )
+    assert error.value.code == "audioexport.metadata_mismatch"

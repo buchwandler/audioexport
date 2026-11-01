@@ -234,6 +234,34 @@ def _load_manifest(path: Path) -> dict[str, Any] | None:
         return None
 
 
+_MAY_BE_ABSENT_METADATA: dict[str, frozenset[str]] = {
+    "m4a": frozenset({"publisher", "encoded_by"}),
+    "m4b": frozenset({"publisher", "encoded_by"}),
+}
+
+
+def _metadata_tag_matches(
+    normalized_tags: Mapping[str, str],
+    *,
+    fmt: str,
+    key: str,
+    expected_value: str,
+) -> bool:
+    normalized_key = key.lower()
+    if normalized_key == "language" and fmt in {"m4a", "m4b"}:
+        expected_value = iso639_2_language_code(expected_value)
+
+    candidates = (
+        ("artist", "author") if normalized_key in {"artist", "author"} else (normalized_key,)
+    )
+    actual_values = [
+        normalized_tags[candidate] for candidate in candidates if candidate in normalized_tags
+    ]
+    if not actual_values:
+        return normalized_key in _MAY_BE_ABSENT_METADATA.get(fmt, frozenset())
+    return expected_value in actual_values
+
+
 def _verify_output(
     path: Path,
     *,
@@ -282,10 +310,12 @@ def _verify_output(
             {key.lower(): value for key, value in stream.get("tags", {}).items()}
         )
     for key, expected_value in metadata.items():
-        if key.lower() == "language" and fmt in {"m4a", "m4b"}:
-            expected_value = iso639_2_language_code(expected_value)
-        candidates = ("artist", "author") if key.lower() in {"artist", "author"} else (key.lower(),)
-        if not any(normalized_tags.get(candidate) == expected_value for candidate in candidates):
+        if not _metadata_tag_matches(
+            normalized_tags,
+            fmt=fmt,
+            key=key,
+            expected_value=expected_value,
+        ):
             raise VerificationError(
                 f"encoded metadata tag {key!r} does not match requested value",
                 code="audioexport.metadata_mismatch",

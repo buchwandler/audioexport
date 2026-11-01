@@ -504,3 +504,33 @@ def test_export_book_uses_custom_roots_and_preserves_explicit_output(
     )
     assert explicit_result.output == explicit_output
     assert captured == [result.output, explicit_output]
+
+
+def test_export_book_manifest_publisher_succeeds_without_override(
+    tmp_path: Path, have_tools: None
+) -> None:
+    from audioexport.book import export_book
+    from audioexport.fftools import probe
+
+    workspace, _ = _workspace(tmp_path)
+    result = export_book(workspace, variant=VARIANT)
+
+    assert result.output.is_file()
+    info = probe(result.output)
+    tags = {key.lower(): value for key, value in info["format"].get("tags", {}).items()}
+    assert tags["title"] == "Platform Decay"
+    assert tags["artist"] == "Martha Wells"
+    assert tags["media_type"] == "2"
+    if "publisher" in tags:
+        assert tags["publisher"] == "Example Press"
+    audio = next(stream for stream in info["streams"] if stream.get("codec_type") == "audio")
+    assert audio["tags"]["language"] == "eng"
+    assert len(info["chapters"]) == 3
+
+    sidecar = json.loads(result.audiobook.manifest_path.read_text(encoding="utf-8"))
+    assert sidecar["options"]["metadata"]["publisher"] == "Example Press"
+
+    repeated = export_book(workspace, variant=VARIANT)
+    assert repeated.audiobook.reused
+    assert repeated.audiobook.export_id == result.audiobook.export_id
+    assert repeated.output == result.output

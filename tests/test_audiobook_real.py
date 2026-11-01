@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -94,3 +95,35 @@ def test_explicit_chapters_file_overrides_automatic_track_chapters(
     result = build_audiobook([wav], tmp_path / "explicit.m4b", chapters_file=chapters_file)
     assert result.chapter_count == 1
     assert probe(result.path)["chapters"][0]["tags"]["title"] == "Entire work"
+
+
+def test_m4b_publisher_metadata_may_be_omitted_by_muxer(
+    tmp_path: Path, wav: Path, have_tools: None
+) -> None:
+    output = tmp_path / "publisher.m4b"
+    metadata = {
+        "title": "Book",
+        "author": "Author",
+        "publisher": "Example Press",
+        "language": "en-US",
+    }
+    result = build_audiobook([AudiobookTrack(wav, title="Part One")], output, metadata=metadata)
+
+    assert result.path.is_file()
+    info = probe(output)
+    tags = {key.lower(): value for key, value in info["format"].get("tags", {}).items()}
+    assert tags["title"] == "Book"
+    assert tags["artist"] == "Author"
+    assert tags["media_type"] == "2"
+    if "publisher" in tags:
+        assert tags["publisher"] == "Example Press"
+    audio = next(stream for stream in info["streams"] if stream.get("codec_type") == "audio")
+    assert audio["tags"]["language"] == "eng"
+    assert [chapter["tags"]["title"] for chapter in info["chapters"]] == ["Part One"]
+
+    sidecar = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert sidecar["options"]["metadata"]["publisher"] == "Example Press"
+
+    reused = build_audiobook([AudiobookTrack(wav, title="Part One")], output, metadata=metadata)
+    assert reused.reused
+    assert reused.export_id == result.export_id
