@@ -1,0 +1,27 @@
+rows:
+  - sha: 73f884453f32567b79f5b1a3958ffcc4a80de832
+    inspected: true
+    inspected_paths:
+      - audioexport/__init__.py
+      - audioexport/api.py
+      - audioexport/bundle_inspection.py
+      - tests/test_api_import.py
+      - tests/test_bundle_inspection.py
+    observed_behavior: "Introduced BundleExportInspection and inspect_bundle_export as public read-only APIs for document and book bundle cache inspection; added tests covering not-started, reusable, stale, and replacement-safe states without launching FFmpeg/FFprobe or mutating workspaces."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false
+  - sha: 426b55e6cac23f09f59f26ca6a8dcc249c1fda10
+    inspected: true
+    inspected_paths:
+      - audioexport/bundle_inspection.py
+    observed_behavior: "Corrected the inspection implementation to use public validation/version helpers and consistent document/book context variables, restoring working inspection across both bundle kinds."
+    public_impact: public
+    decision: accepted
+    target_entry_key: null
+    target_entry_id: null
+    notes: ""
+    stale: false

@@ -1,0 +1,66 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.1.7
+git_base_ref: v0.1.6
+git_base_sha: c0e826092903360b770e971f285fec3a2064d04d
+git_head_ref: HEAD
+git_head_sha: 426b55e6cac23f09f59f26ca6a8dcc249c1fda10
+git_range: c0e826092903360b770e971f285fec3a2064d04d..426b55e6cac23f09f59f26ca6a8dcc249c1fda10
+commit_count: 2
+rows:
+  - sha: 73f884453f32567b79f5b1a3958ffcc4a80de832
+    source_ref: git:73f884453f32567b79f5b1a3958ffcc4a80de832
+    short_sha: 73f8844
+    changed_paths:
+      - audioexport/__init__.py
+      - audioexport/api.py
+      - audioexport/bundle_inspection.py
+      - tests/test_api_import.py
+      - tests/test_bundle_inspection.py
+    stats:
+      files_changed: 5
+      insertions: 951
+      deletions: 0
+    inspected: true
+    inspected_paths:
+      - audioexport/__init__.py
+      - audioexport/api.py
+      - audioexport/bundle_inspection.py
+      - tests/test_api_import.py
+      - tests/test_bundle_inspection.py
+    observed_behavior:
+      Introduced BundleExportInspection and inspect_bundle_export as
+      public read-only APIs for document and book bundle cache inspection; added tests
+      covering not-started, reusable, stale, and replacement-safe states without launching
+      FFmpeg/FFprobe or mutating workspaces.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: api for readio"
+    target_entry_id: entry-0001
+    notes: ""
+  - sha: 426b55e6cac23f09f59f26ca6a8dcc249c1fda10
+    source_ref: git:426b55e6cac23f09f59f26ca6a8dcc249c1fda10
+    short_sha: 426b55e
+    changed_paths:
+      - audioexport/bundle_inspection.py
+    stats:
+      files_changed: 1
+      insertions: 26
+      deletions: 18
+    inspected: true
+    inspected_paths:
+      - audioexport/bundle_inspection.py
+    observed_behavior:
+      Corrected the inspection implementation to use public validation/version
+      helpers and consistent document/book context variables, restoring working inspection
+      across both bundle kinds.
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "fix: pytest"
+    target_entry_id: entry-0001
+    notes: ""
