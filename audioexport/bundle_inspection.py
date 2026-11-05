@@ -17,8 +17,13 @@ from .document import resolve_document_export
 from .errors import AudioExportError, InvalidExportError
 from .formats import FORMATS, encoder_options, normalize_bitrate, normalize_format
 from .metadata import AudiobookMetadata, audiobook_tags
-from .pipeline import _canonical_hash, _manifest_path, _producer_version, sha256_file
-from .validation import cover_kind
+from .pipeline import (
+    _canonical_hash,
+    _manifest_path,
+    _producer_version,
+    sha256_file,
+)
+from .validation import cover_kind, validate_metadata
 
 ExportInspectionState = Literal["not_started", "complete", "stale", "error"]
 
@@ -228,7 +233,7 @@ def _inspect_document_cache(
             source_sha = sha256_file(source)
             fmt = normalize_format(fmt)
             normalized_bitrate = normalize_bitrate(bitrate, fmt)
-            tags = pipeline._validate_metadata(metadata)
+            tags = validate_metadata(metadata)
             artwork = Path(cover).expanduser().absolute() if cover is not None else None
             cover_sha = None
             if artwork is not None:
@@ -353,7 +358,7 @@ def _inspect_book_cache(
             old_options = payload.get("options")
             old_sources = payload.get("sources")
             old_tools = _tool_versions(payload)
-            producer_version = audiobook._producer_version()
+            producer_version = _producer_version()
             if (
                 isinstance(old_options, Mapping)
                 and isinstance(old_sources, list)
@@ -428,7 +433,7 @@ def _inspect_book_cache(
                     cover_sha = sha256_file(cover_path) if cover_path is not None else None
                     if cover_path is not None:
                         cover_kind(cover_path)
-                    expected_options = {
+                    expected_options: dict[str, Any] = {
                         "format": "m4b",
                         "codec": "aac",
                         "encoder": old_options.get("encoder"),
@@ -524,7 +529,7 @@ def inspect_bundle_export(
             batch=False,
         )
         if identity.kind == "book":
-            context = book.resolve_book_export(
+            book_context = book.resolve_book_export(
                 identity.root,
                 variant=variant,
                 chapters=chapters,
@@ -532,7 +537,7 @@ def inspect_bundle_export(
                 output_root=output_root,
             )
             audiobook_profile = load_audiobook_profile(profile) if profile is not None else None
-            book_manifest = book._read_manifest(context.manifest_path)
+            book_manifest = book._read_manifest(book_context.manifest_path)
             resolved_metadata = book._resolved_metadata(
                 book_manifest, audiobook_profile, normalized_metadata
             )
@@ -541,7 +546,7 @@ def inspect_bundle_export(
                 if output is not None
                 else audiobook_profile.output
                 if audiobook_profile is not None
-                else context.default_output
+                else book_context.default_output
             )
             if destination.suffix.casefold() != ".m4b":
                 raise InvalidExportError(
@@ -571,12 +576,14 @@ def inspect_bundle_export(
                 selected_bitrate = audiobook_profile.audio.bitrate
             normalize_bitrate(selected_bitrate, "m4b")
             audiobook_tags(resolved_metadata)
-            if not context.chapters:
+            if not book_context.chapters:
                 raise InvalidExportError(
                     "book export requires at least one selected chapter",
                     code="audioexport.book_chapters_invalid",
                 )
-            if any(chapter.path.resolve() == destination.resolve() for chapter in context.chapters):
+            if any(
+                chapter.path.resolve() == destination.resolve() for chapter in book_context.chapters
+            ):
                 raise InvalidExportError(
                     "input and output must be different files", code="audioexport.same_path"
                 )
@@ -597,7 +604,7 @@ def inspect_bundle_export(
             return _inspect_book_cache(
                 bundle=identity.root,
                 variant=variant,
-                context=context,
+                context=book_context,
                 output=destination,
                 profile=audiobook_profile,
                 resolved_metadata=resolved_metadata,
@@ -611,7 +618,7 @@ def inspect_bundle_export(
                 "document bundle metadata must be a string mapping",
                 code="audioexport.bundle_option_invalid",
             )
-        context = resolve_document_export(
+        document_context = resolve_document_export(
             identity.root,
             variant=variant,
             audiocompose_root=audiocompose_root,
@@ -629,18 +636,19 @@ def inspect_bundle_export(
         destination = (
             Path(output).expanduser().absolute()
             if output is not None
-            else context.output_root / f"{context.default_stem}{FORMATS[selected_format].extension}"
+            else document_context.output_root
+            / f"{document_context.default_stem}{FORMATS[selected_format].extension}"
         )
         if destination.suffix.lower().removeprefix(".") != selected_format:
             raise InvalidExportError(
                 f"format {selected_format!r} conflicts with output extension {destination.suffix!r}",
                 code="audioexport.format_mismatch",
             )
-        if context.document.path.resolve() == destination.resolve():
+        if document_context.document.path.resolve() == destination.resolve():
             raise InvalidExportError(
                 "input and output must be different files", code="audioexport.same_path"
             )
-        pipeline._validate_metadata(normalized_metadata)
+        validate_metadata(normalized_metadata)
         normalize_bitrate(bitrate, selected_format)
         if timeline is not None:
             timeline_chapters = load_chapters(timeline)
@@ -657,7 +665,7 @@ def inspect_bundle_export(
             if (
                 not artwork.is_file()
                 or artwork.resolve() == destination.resolve()
-                or artwork.resolve() == context.document.path.resolve()
+                or artwork.resolve() == document_context.document.path.resolve()
             ):
                 raise InvalidExportError("cover image is invalid", code="audioexport.cover_invalid")
             cover_kind(artwork)
@@ -665,13 +673,13 @@ def inspect_bundle_export(
             bundle=identity.root,
             variant=variant,
             output=destination,
-            source=context.document.path,
+            source=document_context.document.path,
             fmt=selected_format,
             bitrate=bitrate,
             metadata=normalized_metadata,
             cover=cover,
             timeline=timeline,
-            selected_chapters=(context.document.id,),
+            selected_chapters=(document_context.document.id,),
         )
     except (AudioExportError, OSError, ValueError, TypeError) as exc:
         try:
