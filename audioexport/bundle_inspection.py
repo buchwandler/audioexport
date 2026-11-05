@@ -1,0 +1,692 @@
+"""Read-only inspection of bundle export outputs and cache identities."""
+
+from __future__ import annotations
+
+import wave
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
+
+from . import audiobook, book, pipeline
+from .audiobook_profile import AudiobookProfile, load_audiobook_profile
+from .bundle import _validate_options_for_kind
+from .bundle_contract import BundleKind, load_bundle_identity
+from .chapters import load_chapters
+from .document import resolve_document_export
+from .errors import AudioExportError, InvalidExportError
+from .formats import FORMATS, encoder_options, normalize_bitrate, normalize_format
+from .metadata import AudiobookMetadata, audiobook_tags
+from .pipeline import _canonical_hash, _manifest_path, _producer_version, sha256_file
+from .validation import cover_kind
+
+ExportInspectionState = Literal["not_started", "complete", "stale", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class BundleExportInspection:
+    """Requested export readiness without invoking encoders or changing files."""
+
+    kind: BundleKind | None
+    bundle: Path
+    variant: str
+    selected_chapters: tuple[str, ...]
+    output: Path | None
+    sidecar: Path | None
+    state: ExportInspectionState
+    reusable: bool
+    export_identity: str | None = None
+    detail: str | None = None
+    error_code: str | None = None
+    tool_versions_checked: bool = False
+
+    @property
+    def replacement_safe(self) -> bool:
+        """Whether specialist-validated output paths can be safely force-replaced."""
+        if self.output is None:
+            return False
+        for path in (self.output, self.sidecar):
+            if path is None:
+                continue
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                return False
+        return True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "format": "audioexport-bundle-inspection",
+            "version": 1,
+            "kind": self.kind,
+            "bundle": str(self.bundle),
+            "variant": self.variant,
+            "selected_chapters": list(self.selected_chapters),
+            "output": str(self.output) if self.output is not None else None,
+            "sidecar": str(self.sidecar) if self.sidecar is not None else None,
+            "state": self.state,
+            "reusable": self.reusable,
+            "export_identity": self.export_identity,
+            "detail": self.detail,
+            "error_code": self.error_code,
+            "tool_versions_checked": self.tool_versions_checked,
+            "replacement_safe": self.replacement_safe,
+        }
+
+
+def _present(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _tool_versions(payload: Mapping[str, Any]) -> Mapping[str, str] | None:
+    tools = payload.get("tools")
+    if not isinstance(tools, Mapping):
+        return None
+    ffmpeg = tools.get("ffmpeg")
+    ffprobe = tools.get("ffprobe")
+    if not isinstance(ffmpeg, str) or not ffmpeg or not isinstance(ffprobe, str) or not ffprobe:
+        return None
+    return {"ffmpeg": ffmpeg, "ffprobe": ffprobe}
+
+
+def _cached_result(
+    *,
+    kind: BundleKind,
+    bundle: Path,
+    variant: str,
+    selected_chapters: tuple[str, ...],
+    output: Path,
+    sidecar: Path,
+    payload: Mapping[str, Any] | None,
+    identity_matches: bool,
+    mismatch_detail: str,
+) -> BundleExportInspection:
+    """Apply the same output-integrity gate used by AudioExport's cache."""
+    if not _present(output) and not _present(sidecar):
+        return BundleExportInspection(
+            kind,
+            bundle,
+            variant,
+            selected_chapters,
+            output,
+            sidecar,
+            "not_started",
+            False,
+            detail="No export output or manifest exists.",
+        )
+    if output.is_symlink() or sidecar.is_symlink():
+        return BundleExportInspection(
+            kind,
+            bundle,
+            variant,
+            selected_chapters,
+            output,
+            sidecar,
+            "stale",
+            False,
+            detail="Output and manifest must be regular non-symlink files.",
+        )
+    if not output.is_file():
+        return BundleExportInspection(
+            kind,
+            bundle,
+            variant,
+            selected_chapters,
+            output,
+            sidecar,
+            "stale",
+            False,
+            detail="The export output is missing or is not a regular file.",
+        )
+    if not sidecar.is_file() or payload is None:
+        return BundleExportInspection(
+            kind,
+            bundle,
+            variant,
+            selected_chapters,
+            output,
+            sidecar,
+            "stale",
+            False,
+            detail="The output has no valid AudioExport manifest.",
+        )
+    actual_sha = sha256_file(output)
+    if payload.get("output_sha256") != actual_sha:
+        return BundleExportInspection(
+            kind,
+            bundle,
+            variant,
+            selected_chapters,
+            output,
+            sidecar,
+            "stale",
+            False,
+            str(payload.get("export_id")) if isinstance(payload.get("export_id"), str) else None,
+            "The output bytes no longer match the manifest checksum.",
+        )
+    export_id = payload.get("export_id")
+    if not identity_matches:
+        return BundleExportInspection(
+            kind,
+            bundle,
+            variant,
+            selected_chapters,
+            output,
+            sidecar,
+            "stale",
+            False,
+            export_id if isinstance(export_id, str) else None,
+            mismatch_detail,
+        )
+    return BundleExportInspection(
+        kind,
+        bundle,
+        variant,
+        selected_chapters,
+        output,
+        sidecar,
+        "complete",
+        True,
+        export_id if isinstance(export_id, str) else None,
+        "Output checksum and request identity match the stored cache. FFmpeg/FFprobe were not invoked; their recorded versions are used for identity comparison.",
+        tool_versions_checked=False,
+    )
+
+
+def _inspect_document_cache(
+    *,
+    bundle: Path,
+    variant: str,
+    output: Path,
+    source: Path,
+    fmt: str,
+    bitrate: str | int | None,
+    metadata: Mapping[str, str] | None,
+    cover: str | Path | None,
+    timeline: str | Path | None,
+    selected_chapters: tuple[str, ...],
+) -> BundleExportInspection:
+    sidecar = _manifest_path(output)
+    payload = pipeline._load_manifest(sidecar)
+    if not _present(output) and not _present(sidecar):
+        return _cached_result(
+            kind="document",
+            bundle=bundle,
+            variant=variant,
+            selected_chapters=selected_chapters,
+            output=output,
+            sidecar=sidecar,
+            payload=None,
+            identity_matches=False,
+            mismatch_detail="",
+        )
+    mismatch = "Stored export identity does not match the requested document export."
+    matches = False
+    if payload is not None:
+        old_options = payload.get("options")
+        old_tools = _tool_versions(payload)
+        old_source_sha = payload.get("source_sha256")
+        try:
+            source_sha = sha256_file(source)
+            fmt = normalize_format(fmt)
+            normalized_bitrate = normalize_bitrate(bitrate, fmt)
+            tags = pipeline._validate_metadata(metadata)
+            artwork = Path(cover).expanduser().absolute() if cover is not None else None
+            cover_sha = None
+            if artwork is not None:
+                if not artwork.is_file() or artwork.resolve() == output.resolve():
+                    raise InvalidExportError(
+                        "cover image is invalid", code="audioexport.cover_invalid"
+                    )
+                cover_kind(artwork)
+                cover_sha = sha256_file(artwork)
+            timeline_sha = sha256_file(Path(timeline)) if timeline is not None else None
+            if timeline is None:
+                chapters: Any = []
+            elif (
+                isinstance(old_options, Mapping)
+                and old_source_sha == source_sha
+                and old_options.get("timeline_sha256") == timeline_sha
+                and isinstance(old_options.get("chapters"), list)
+            ):
+                # The same source bytes and timeline bytes imply the same normalized
+                # chapter positions; reuse the recorded normalized rows without probing.
+                chapters = old_options["chapters"]
+            else:
+                chapters = None
+            codec = old_options.get("codec") if isinstance(old_options, Mapping) else None
+            supported_codecs = (FORMATS[fmt].codec, *FORMATS[fmt].fallback_codecs)
+            if (
+                chapters is not None
+                and isinstance(codec, str)
+                and codec in supported_codecs
+                and isinstance(old_options, Mapping)
+                and old_tools is not None
+            ):
+                expected_options = {
+                    "format": fmt,
+                    "codec": codec,
+                    "codec_args": list(encoder_options(codec)),
+                    "bitrate": normalized_bitrate,
+                    "metadata": tags,
+                    "cover_sha256": cover_sha,
+                    "timeline_sha256": timeline_sha,
+                    "chapters": chapters,
+                }
+                identity = _canonical_hash(
+                    {
+                        "schema": "audioexport.identity.v1",
+                        "source_sha256": source_sha,
+                        "options": expected_options,
+                        "ffmpeg": old_tools["ffmpeg"],
+                        "ffprobe": old_tools["ffprobe"],
+                        "producer_version": _producer_version(),
+                    }
+                )
+                matches = (
+                    old_source_sha == source_sha
+                    and old_options == expected_options
+                    and payload.get("producer_version") == _producer_version()
+                    and payload.get("export_id") == identity
+                )
+        except (AudioExportError, OSError, ValueError, TypeError):
+            matches = False
+    return _cached_result(
+        kind="document",
+        bundle=bundle,
+        variant=variant,
+        selected_chapters=selected_chapters,
+        output=output,
+        sidecar=sidecar,
+        payload=payload,
+        identity_matches=matches,
+        mismatch_detail=mismatch,
+    )
+
+
+def _read_wav_properties(path: Path) -> tuple[int, int]:
+    try:
+        with wave.open(str(path), "rb") as source:
+            rate = source.getframerate()
+            channels = source.getnchannels()
+    except (OSError, EOFError, wave.Error) as exc:
+        raise InvalidExportError(
+            f"cannot read composed WAV properties: {path}", code="audioexport.source_invalid"
+        ) from exc
+    if rate <= 0 or channels <= 0:
+        raise InvalidExportError(
+            f"invalid composed WAV properties: {path}", code="audioexport.source_invalid"
+        )
+    return rate, channels
+
+
+def _inspect_book_cache(
+    *,
+    bundle: Path,
+    variant: str,
+    context: book.BookExportContext,
+    output: Path,
+    profile: AudiobookProfile | None,
+    resolved_metadata: AudiobookMetadata,
+    cover: str | Path | None,
+    bitrate: str | int | None,
+    sample_rate: int | None,
+    channels: int | None,
+) -> BundleExportInspection:
+    sidecar = _manifest_path(output)
+    payload = audiobook._load_audiobook_manifest(sidecar)
+    selected_chapters = tuple(chapter.id for chapter in context.chapters)
+    if not _present(output) and not _present(sidecar):
+        return _cached_result(
+            kind="book",
+            bundle=bundle,
+            variant=variant,
+            selected_chapters=selected_chapters,
+            output=output,
+            sidecar=sidecar,
+            payload=None,
+            identity_matches=False,
+            mismatch_detail="",
+        )
+    matches = False
+    mismatch = "Stored audiobook identity does not match the requested book export."
+    if payload is not None:
+        try:
+            old_options = payload.get("options")
+            old_sources = payload.get("sources")
+            old_tools = _tool_versions(payload)
+            producer_version = audiobook._producer_version()
+            if (
+                isinstance(old_options, Mapping)
+                and isinstance(old_sources, list)
+                and len(old_sources) == len(context.chapters)
+                and old_tools is not None
+                and payload.get("producer_version") == producer_version
+            ):
+                source_records: list[dict[str, Any]] = []
+                hashes_match = True
+                for chapter, old_source in zip(context.chapters, old_sources):
+                    if not isinstance(old_source, Mapping):
+                        hashes_match = False
+                        break
+                    digest = sha256_file(chapter.path)
+                    if (
+                        old_source.get("name") != chapter.path.name
+                        or old_source.get("sha256") != digest
+                        or old_source.get("explicit_title") != chapter.title
+                        or old_source.get("chapter_title") != chapter.title
+                    ):
+                        hashes_match = False
+                        break
+                    source_title = old_source.get("source_title")
+                    if source_title is not None and not isinstance(source_title, str):
+                        hashes_match = False
+                        break
+                    source_records.append(
+                        {
+                            "name": chapter.path.name,
+                            "sha256": digest,
+                            "explicit_title": chapter.title,
+                            "source_title": source_title,
+                            "chapter_title": chapter.title,
+                        }
+                    )
+                if hashes_match:
+                    source_rate, source_channels = _read_wav_properties(context.chapters[0].path)
+                    selected_rate = (
+                        sample_rate
+                        if sample_rate is not None
+                        else profile.audio.sample_rate
+                        if profile is not None and profile.audio.sample_rate is not None
+                        else source_rate
+                    )
+                    selected_channels = (
+                        channels
+                        if channels is not None
+                        else profile.audio.channels
+                        if profile is not None and profile.audio.channels is not None
+                        else source_channels
+                    )
+                    selected_bitrate = bitrate
+                    if profile is not None and selected_bitrate is None:
+                        selected_bitrate = profile.audio.bitrate
+                    normalized_bitrate = normalize_bitrate(selected_bitrate, "m4b")
+                    selected_cover = (
+                        Path(cover).expanduser()
+                        if cover is not None
+                        else profile.cover
+                        if profile is not None
+                        else None
+                    )
+                    cover_path = (
+                        selected_cover.resolve(strict=True) if selected_cover is not None else None
+                    )
+                    if cover_path is not None and (
+                        not cover_path.is_file() or cover_path == output.resolve()
+                    ):
+                        raise InvalidExportError(
+                            "cover image is invalid", code="audioexport.cover_invalid"
+                        )
+                    cover_sha = sha256_file(cover_path) if cover_path is not None else None
+                    if cover_path is not None:
+                        cover_kind(cover_path)
+                    expected_options = {
+                        "format": "m4b",
+                        "codec": "aac",
+                        "encoder": old_options.get("encoder"),
+                        "bitrate": normalized_bitrate,
+                        "sample_rate": selected_rate,
+                        "channels": selected_channels,
+                        "metadata": audiobook_tags(resolved_metadata),
+                        "resources": {
+                            "cover_sha256": cover_sha,
+                            "chapters_file_sha256": None,
+                            "chapters_file_name": None,
+                            "discovered_resources": [],
+                        },
+                        "chapter_request": {
+                            "mode": "tracks",
+                            "title_source": "tag",
+                            "titles": [chapter.title for chapter in context.chapters],
+                        },
+                    }
+                    stored_base_options = {
+                        key: value for key, value in old_options.items() if key != "chapters"
+                    }
+                    encoder_ok = expected_options["encoder"] == "aac"
+                    request_id = _canonical_hash(
+                        {
+                            "schema": "audioexport.audiobook-request.v1",
+                            "sources": source_records,
+                            "options": expected_options,
+                            "ffmpeg": old_tools["ffmpeg"],
+                            "ffprobe": old_tools["ffprobe"],
+                            "producer_version": producer_version,
+                        }
+                    )
+                    matches = (
+                        encoder_ok
+                        and stored_base_options == expected_options
+                        and payload.get("request_id") == request_id
+                    )
+        except (AudioExportError, OSError, ValueError, TypeError, RuntimeError):
+            matches = False
+    return _cached_result(
+        kind="book",
+        bundle=bundle,
+        variant=variant,
+        selected_chapters=selected_chapters,
+        output=output,
+        sidecar=sidecar,
+        payload=payload,
+        identity_matches=matches,
+        mismatch_detail=mismatch,
+    )
+
+
+def inspect_bundle_export(
+    bundle: str | Path,
+    *,
+    variant: str,
+    chapters: str = "all",
+    output: str | Path | None = None,
+    format: str | None = None,
+    profile: str | Path | None = None,
+    bitrate: str | int | None = None,
+    sample_rate: int | None = None,
+    channels: int | None = None,
+    metadata: AudiobookMetadata | Mapping[str, str] | None = None,
+    cover: str | Path | None = None,
+    timeline: str | Path | None = None,
+    audiocompose_root: str | Path | None = None,
+    output_root: str | Path | None = None,
+    ffmpeg: str | Path | None = None,
+    ffprobe: str | Path | None = None,
+) -> BundleExportInspection:
+    """Inspect a bundle export request without launching FFmpeg/FFprobe or writing files.
+
+    Recorded tool versions participate in cache identity. To keep inspection strictly
+    read-only with respect to external processes, those versions are taken from an
+    intact AudioExport manifest rather than queried from the current executables.
+    """
+    del ffmpeg, ffprobe  # Accepted for parity with export_bundle; never executed here.
+    try:
+        bundle_path = Path(bundle).expanduser().absolute()
+        identity = load_bundle_identity(bundle_path)
+        normalized_metadata = _validate_options_for_kind(
+            kind=identity.kind,
+            chapters=chapters,
+            output=output,
+            format=format,
+            profile=profile,
+            sample_rate=sample_rate,
+            channels=channels,
+            timeline=timeline,
+            metadata=metadata,
+            batch=False,
+        )
+        if identity.kind == "book":
+            context = book.resolve_book_export(
+                identity.root,
+                variant=variant,
+                chapters=chapters,
+                audiocompose_root=audiocompose_root,
+                output_root=output_root,
+            )
+            audiobook_profile = load_audiobook_profile(profile) if profile is not None else None
+            book_manifest = book._read_manifest(context.manifest_path)
+            resolved_metadata = book._resolved_metadata(
+                book_manifest, audiobook_profile, normalized_metadata
+            )
+            destination = (
+                Path(output).expanduser().absolute()
+                if output is not None
+                else audiobook_profile.output
+                if audiobook_profile is not None
+                else context.default_output
+            )
+            if destination.suffix.casefold() != ".m4b":
+                raise InvalidExportError(
+                    "audiobook output must use the .m4b extension",
+                    code="audioexport.audiobook_output_invalid",
+                )
+            if sample_rate is not None and (
+                isinstance(sample_rate, bool)
+                or not isinstance(sample_rate, int)
+                or not 8000 <= sample_rate <= 384000
+            ):
+                raise InvalidExportError(
+                    "sample rate must be an integer between 8000 and 384000",
+                    code="audioexport.audiobook_input_invalid",
+                )
+            if channels is not None and (
+                isinstance(channels, bool)
+                or not isinstance(channels, int)
+                or channels not in (1, 2)
+            ):
+                raise InvalidExportError(
+                    "audiobook channels must be 1 or 2",
+                    code="audioexport.audiobook_input_invalid",
+                )
+            selected_bitrate = bitrate
+            if selected_bitrate is None and audiobook_profile is not None:
+                selected_bitrate = audiobook_profile.audio.bitrate
+            normalize_bitrate(selected_bitrate, "m4b")
+            audiobook_tags(resolved_metadata)
+            if not context.chapters:
+                raise InvalidExportError(
+                    "book export requires at least one selected chapter",
+                    code="audioexport.book_chapters_invalid",
+                )
+            if any(chapter.path.resolve() == destination.resolve() for chapter in context.chapters):
+                raise InvalidExportError(
+                    "input and output must be different files", code="audioexport.same_path"
+                )
+            selected_cover = (
+                Path(cover).expanduser()
+                if cover is not None
+                else audiobook_profile.cover
+                if audiobook_profile is not None
+                else None
+            )
+            if selected_cover is not None:
+                cover_path = selected_cover.resolve(strict=True)
+                if not cover_path.is_file() or cover_path == destination.resolve():
+                    raise InvalidExportError(
+                        "cover image is invalid", code="audioexport.cover_invalid"
+                    )
+                cover_kind(cover_path)
+            return _inspect_book_cache(
+                bundle=identity.root,
+                variant=variant,
+                context=context,
+                output=destination,
+                profile=audiobook_profile,
+                resolved_metadata=resolved_metadata,
+                cover=cover,
+                bitrate=bitrate,
+                sample_rate=sample_rate,
+                channels=channels,
+            )
+        if isinstance(normalized_metadata, AudiobookMetadata):
+            raise InvalidExportError(
+                "document bundle metadata must be a string mapping",
+                code="audioexport.bundle_option_invalid",
+            )
+        context = resolve_document_export(
+            identity.root,
+            variant=variant,
+            audiocompose_root=audiocompose_root,
+            output_root=output_root,
+        )
+        if format is not None:
+            selected_format = normalize_format(format)
+        elif output is not None:
+            selected_format = normalize_format(Path(output).suffix)
+        else:
+            raise InvalidExportError(
+                "document export requires a format or output filename extension",
+                code="audioexport.document_format_required",
+            )
+        destination = (
+            Path(output).expanduser().absolute()
+            if output is not None
+            else context.output_root / f"{context.default_stem}{FORMATS[selected_format].extension}"
+        )
+        if destination.suffix.lower().removeprefix(".") != selected_format:
+            raise InvalidExportError(
+                f"format {selected_format!r} conflicts with output extension {destination.suffix!r}",
+                code="audioexport.format_mismatch",
+            )
+        if context.document.path.resolve() == destination.resolve():
+            raise InvalidExportError(
+                "input and output must be different files", code="audioexport.same_path"
+            )
+        pipeline._validate_metadata(normalized_metadata)
+        normalize_bitrate(bitrate, selected_format)
+        if timeline is not None:
+            timeline_chapters = load_chapters(timeline)
+            if timeline_chapters and selected_format not in {"m4b", "m4a"}:
+                raise InvalidExportError(
+                    "chapter marks require M4B or M4A", code="audioexport.chapters_unsupported"
+                )
+        if cover is not None:
+            if selected_format not in {"mp3", "m4a", "m4b"}:
+                raise InvalidExportError(
+                    "cover art requires MP3/M4A/M4B", code="audioexport.cover_unsupported"
+                )
+            artwork = Path(cover).expanduser().absolute()
+            if (
+                not artwork.is_file()
+                or artwork.resolve() == destination.resolve()
+                or artwork.resolve() == context.document.path.resolve()
+            ):
+                raise InvalidExportError("cover image is invalid", code="audioexport.cover_invalid")
+            cover_kind(artwork)
+        return _inspect_document_cache(
+            bundle=identity.root,
+            variant=variant,
+            output=destination,
+            source=context.document.path,
+            fmt=selected_format,
+            bitrate=bitrate,
+            metadata=normalized_metadata,
+            cover=cover,
+            timeline=timeline,
+            selected_chapters=(context.document.id,),
+        )
+    except (AudioExportError, OSError, ValueError, TypeError) as exc:
+        try:
+            bundle_path = Path(bundle).expanduser().absolute()
+        except (OSError, TypeError, ValueError):
+            bundle_path = Path(".").absolute()
+        return BundleExportInspection(
+            kind=None,
+            bundle=bundle_path,
+            variant=variant,
+            selected_chapters=(),
+            output=None,
+            sidecar=None,
+            state="error",
+            reusable=False,
+            detail=str(exc),
+            error_code=getattr(exc, "code", "audioexport.bundle_inspection_failed"),
+        )

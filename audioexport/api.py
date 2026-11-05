@@ -12,6 +12,7 @@ from .book import (
     resolve_book_export,
 )
 from .bundle import BundleExportBatchResult, BundleExportResult, export_bundle, export_bundle_all
+from .bundle_inspection import BundleExportInspection, inspect_bundle_export
 from .chapters import Chapter, load_chapters
 from .document import (
     ComposedDocument,
@@ -46,6 +47,7 @@ __all__ = [
     "BookExportContext",
     "BookExportResult",
     "BundleExportBatchResult",
+    "BundleExportInspection",
     "BundleExportResult",
     "BundleVariantInfo",
     "BundleVariantsResult",
@@ -69,6 +71,7 @@ __all__ = [
     "export_bundle",
     "export_bundle_all",
     "export_document",
+    "inspect_bundle_export",
     "list_bundle_variants",
     "load_audiobook_profile",
     "load_chapters",
