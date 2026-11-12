@@ -1,0 +1,46 @@
+schema_version: 1
+object_type: commit_audit_sheet
+versioning:
+  schema_version: 1
+  revision: 3
+release_version: v0.1.8
+git_base_ref: v0.1.7
+git_base_sha: 0852cf5d3e175edf06a7f4cadfc06efef84087e5
+git_head_ref: HEAD
+git_head_sha: eb983a8b4057f7832b82e477aeffdd2d8fc9cb73
+git_range: 0852cf5d3e175edf06a7f4cadfc06efef84087e5..eb983a8b4057f7832b82e477aeffdd2d8fc9cb73
+commit_count: 1
+rows:
+  - sha: eb983a8b4057f7832b82e477aeffdd2d8fc9cb73
+    source_ref: git:eb983a8b4057f7832b82e477aeffdd2d8fc9cb73
+    short_sha: eb983a8
+    changed_paths:
+      - audioexport/audiobook.py
+      - audioexport/formats.py
+      - audioexport/pipeline.py
+      - tests/test_audiobook_real.py
+      - tests/test_book.py
+      - tests/test_core.py
+    stats:
+      files_changed: 6
+      insertions: 49
+      deletions: 5
+    inspected: true
+    inspected_paths:
+      - audioexport/audiobook.py
+      - audioexport/formats.py
+      - audioexport/pipeline.py
+      - tests/test_audiobook_real.py
+      - tests/test_book.py
+      - tests/test_core.py
+    observed_behavior:
+      M4B exports use the audiobook-specific M4B container brand, verification
+      rejects outputs with a different brand, and muxer settings are included in cache
+      identity
+    public_impact: public
+    decision: accepted
+    stale: false
+    evidence_subject: "feat: fix m4b generation"
+    target_entry_key: m4b-audiobook-branding
+    target_entry_id: entry-0001
+    notes: ""
