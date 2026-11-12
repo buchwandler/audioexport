@@ -23,7 +23,13 @@ FORMATS: dict[str, FormatSpec] = {
     "flac": FormatSpec(".flac", "flac", "flac"),
     "mp3": FormatSpec(".mp3", "libmp3lame", "mp3", "192k", ("-id3v2_version", "3")),
     "m4a": FormatSpec(".m4a", "aac", "ipod", "192k", ("-movflags", "+faststart")),
-    "m4b": FormatSpec(".m4b", "aac", "ipod", "192k", ("-movflags", "+faststart")),
+    "m4b": FormatSpec(
+        ".m4b",
+        "aac",
+        "ipod",
+        "192k",
+        ("-movflags", "+faststart", "-brand", "M4B "),
+    ),
     # Some packaged FFmpeg builds omit the optional libvorbis encoder but
     # retain FFmpeg's native Vorbis encoder.
     "ogg": FormatSpec(".ogg", "libvorbis", "ogg", fallback_codecs=("vorbis",)),

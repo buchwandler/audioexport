@@ -21,7 +21,7 @@ from .chapters import (
 )
 from .errors import EncodingError, InvalidExportError, VerificationError
 from .fftools import encoder_for_format, executable, probe, run, version
-from .formats import EXPECTED_CODECS, encoder_options, normalize_bitrate
+from .formats import EXPECTED_CODECS, FORMATS, encoder_options, normalize_bitrate
 from .inputs import discover_audio_inputs, source_title
 from .metadata import AudiobookMetadata, audiobook_tags, iso639_2_language_code
 from .pipeline import (
@@ -518,6 +518,7 @@ def _build_unlocked(
     ffmpeg_version = version(ffmpeg_exe)
     ffprobe_version = version(ffprobe_exe)
     encoder = encoder_for_format("m4b", ffmpeg_exe)
+    spec = FORMATS["m4b"]
 
     source_characteristics: list[tuple[int, int]] = []
     source_hashes: list[str] = []
@@ -575,6 +576,8 @@ def _build_unlocked(
         "format": "m4b",
         "codec": "aac",
         "encoder": encoder,
+        "muxer": spec.muxer,
+        "muxer_args": list(spec.extra_args),
         "bitrate": rate,
         "sample_rate": target_rate,
         "channels": target_channels,
@@ -707,7 +710,7 @@ def _build_unlocked(
                 command.extend(["-metadata:s:a:0", f"language={iso639_2_language_code(value)}"])
             else:
                 command.extend(["-metadata", f"{key}={value}"])
-        command.extend(["-movflags", "+faststart", "-f", "ipod", str(final_temp)])
+        command.extend([*spec.extra_args, "-f", spec.muxer, str(final_temp)])
         try:
             run(command)
         except EncodingError as exc:

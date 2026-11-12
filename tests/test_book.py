@@ -521,11 +521,17 @@ def test_export_book_manifest_publisher_succeeds_without_override(
     assert tags["title"] == "Platform Decay"
     assert tags["artist"] == "Martha Wells"
     assert tags["media_type"] == "2"
+    assert tags["major_brand"] == "M4B "
     if "publisher" in tags:
         assert tags["publisher"] == "Example Press"
     audio = next(stream for stream in info["streams"] if stream.get("codec_type") == "audio")
     assert audio["tags"]["language"] == "eng"
     assert len(info["chapters"]) == 3
+    assert [chapter["tags"]["title"] for chapter in info["chapters"]] == ["Five", "Two", "Seven"]
+    assert float(info["chapters"][0]["start_time"]) == pytest.approx(0.0, abs=0.001)
+    assert float(info["chapters"][-1]["end_time"]) == pytest.approx(
+        float(info["format"]["duration"]), abs=0.035
+    )
 
     sidecar = json.loads(result.audiobook.manifest_path.read_text(encoding="utf-8"))
     assert sidecar["options"]["metadata"]["publisher"] == "Example Press"

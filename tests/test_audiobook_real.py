@@ -64,6 +64,8 @@ def test_mixed_tracks_build_aac_audiobook_and_cache_respects_order(
     assert tags["title"] == "The Book"
     assert tags["artist"] == "A. Author"
     assert tags["media_type"] == "2"
+    assert tags["major_brand"] == "M4B "
+    assert len(info["chapters"]) == 2
 
     reused = build_audiobook(
         [AudiobookTrack(second, title="Explicit second"), first],

@@ -89,7 +89,12 @@ def test_real_ffmpeg_formats(fmt: str, wav: Path, have_tools: None) -> None:
     repeat = encode(wav, target, format=fmt)
     assert repeat.reused
     assert result.export_id == repeat.export_id
-    assert any(x["codec_type"] == "audio" for x in probe(target)["streams"])
+    info = probe(target)
+    assert any(x["codec_type"] == "audio" for x in info["streams"])
+    if fmt in ("m4a", "m4b"):
+        tags = {key.lower(): value for key, value in info["format"].get("tags", {}).items()}
+        expected_brand = "M4A " if fmt == "m4a" else "M4B "
+        assert tags["major_brand"] == expected_brand
 
 
 def test_source_options_and_no_clobber(wav: Path, have_tools: None) -> None:
@@ -132,6 +137,7 @@ def test_m4b_sample_chapters_and_metadata(wav: Path, tmp_path: Path, have_tools:
     )
     assert result.chapter_count == 2
     info = probe(target)
+    assert info["format"]["tags"]["major_brand"] == "M4B "
     assert info["streams"][0]["tags"]["language"] == "eng"
     assert len(info["chapters"]) == 2
     assert info["chapters"][1]["tags"]["title"] == "Second;#="
@@ -177,6 +183,9 @@ def _run_metadata_verification(
     tags: dict[str, str],
     metadata: dict[str, str],
 ) -> None:
+    effective_tags = dict(tags)
+    if fmt == "m4b":
+        effective_tags.setdefault("major_brand", "M4B ")
     info = {
         "streams": [
             {
@@ -187,7 +196,7 @@ def _run_metadata_verification(
                 "tags": {},
             }
         ],
-        "format": {"tags": tags},
+        "format": {"tags": effective_tags},
         "chapters": [],
     }
     monkeypatch.setattr(pipeline, "probe", lambda _path, _ffprobe: info)
@@ -201,6 +210,17 @@ def _run_metadata_verification(
         ffprobe="ffprobe",
         source_duration_ms=1000,
     )
+
+
+def test_m4b_rejects_wrong_major_brand(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(VerificationError) as error:
+        _run_metadata_verification(
+            monkeypatch,
+            fmt="m4b",
+            tags={"major_brand": "M4A "},
+            metadata={},
+        )
+    assert error.value.code == "audioexport.container_mismatch"
 
 
 @pytest.mark.parametrize(

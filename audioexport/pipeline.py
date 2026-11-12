@@ -305,6 +305,11 @@ def _verify_output(
         )
     format_tags = info["format"].get("tags", {})
     normalized_tags = {key.lower(): value for key, value in format_tags.items()}
+    if fmt == "m4b" and normalized_tags.get("major_brand") != "M4B ":
+        raise VerificationError(
+            "encoded M4B is not branded as an audiobook",
+            code="audioexport.container_mismatch",
+        )
     for stream in audio_streams:
         normalized_tags.update(
             {key.lower(): value for key, value in stream.get("tags", {}).items()}
@@ -438,6 +443,8 @@ def _encode_unlocked(
         "format": fmt,
         "codec": codec,
         "codec_args": codec_args,
+        "muxer": spec.muxer,
+        "muxer_args": list(spec.extra_args),
         "bitrate": rate,
         "metadata": tags,
         "cover_sha256": cover_sha,
